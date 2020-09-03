@@ -15,14 +15,11 @@
 
 package com.amazon.opendistroforelasticsearch.ad.ml;
 
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE;
-
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -31,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -43,15 +41,14 @@ import java.util.stream.Stream;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.monitor.jvm.JvmService;
 
+import com.amazon.opendistroforelasticsearch.ad.MemoryTracker;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.ResourceNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
+import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.rcf.CombinedRcfResult;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
-import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 import com.amazon.randomcutforest.RandomCutForest;
 import com.amazon.randomcutforest.serialize.RandomCutForestSerDe;
 import com.google.gson.Gson;
@@ -60,14 +57,19 @@ import com.google.gson.Gson;
  * A facade managing ML operations and models.
  */
 public class ModelManager {
+    // debug mode. Output more information.
+    private static final boolean DEBUG = true;
 
     protected static final String DETECTOR_ID_PATTERN = "(.*)_model_.+";
-    protected static final String RCF_MODEL_ID_PATTERN = "%s_model_rcf_%d";
-    protected static final String THRESHOLD_MODEL_ID_PATTERN = "%s_model_threshold";
+
+    protected static final String ENTITY_SAMPLE = "sp";
+    protected static final String ENTITY_RCF = "rcf";
+    protected static final String ENTITY_THRESHOLD = "th";
 
     public enum ModelType {
         RCF("rcf"),
-        THRESHOLD("threshold");
+        THRESHOLD("threshold"),
+        ENTITY("entity");
 
         private String name;
 
@@ -85,12 +87,10 @@ public class ModelManager {
     private static final Logger logger = LogManager.getLogger(ModelManager.class);
 
     // states
-    private Map<String, ModelState<RandomCutForest>> forests;
+    private RCFMemoryAwareConcurrentHashmap<String> forests;
     private Map<String, ModelState<ThresholdingModel>> thresholds;
 
     // configuration
-    private final double modelDesiredSizePercentage;
-    private double modelMaxSizePercentage;
     private final int rcfNumTrees;
     private final int rcfNumSamplesInTree;
     private final double rcfTimeDecay;
@@ -107,29 +107,24 @@ public class ModelManager {
     private final Duration checkpointInterval;
 
     // dependencies
-    private final DiscoveryNodeFilterer nodeFilter;
-    private final JvmService jvmService;
     private final RandomCutForestSerDe rcfSerde;
     private final CheckpointDao checkpointDao;
     private final Gson gson;
     private final Clock clock;
+    public FeatureManager featureManager;
 
-    // A tree of N samples has 2N nodes, with one bounding box for each node.
-    private static final long BOUNDING_BOXES = 2L;
-    // A bounding box has one vector for min values and one for max.
-    private static final long VECTORS_IN_BOUNDING_BOX = 2L;
+    private EntityColdStarter entityColdStarter;
+    private Map<String, ModelStateMeta> modelStateMeta;
+    private ModelPartitioner modelPartitioner;
+    private MemoryTracker memoryTracker;
 
     /**
      * Constructor.
      *
-     * @param nodeFilter utility class to select nodes
-     * @param jvmService jvm info
      * @param rcfSerde RCF model serialization
      * @param checkpointDao model checkpoint storage
      * @param gson thresholding model serialization
      * @param clock clock for system time
-     * @param modelDesiredSizePercentage percentage of heap for the desired size of a model
-     * @param modelMaxSizePercentage percentage of heap for the max size of a model
      * @param rcfNumTrees number of trees used in RCF
      * @param rcfNumSamplesInTree number of samples in a RCF tree
      * @param rcfTimeDecay time decay for RCF
@@ -144,17 +139,16 @@ public class ModelManager {
      * @param minPreviewSize minimum number of data points for preview
      * @param modelTtl time to live for hosted models
      * @param checkpointInterval interval between checkpoints
-     * @param clusterService cluster service object
+     * @param entityColdStarter Used train models on input data
+     * @param modelPartitioner Used to partition RCF models
+     * @param featureManager Used to create features for models
+     * @param memoryTracker AD memory usage tracker
      */
     public ModelManager(
-        DiscoveryNodeFilterer nodeFilter,
-        JvmService jvmService,
         RandomCutForestSerDe rcfSerde,
         CheckpointDao checkpointDao,
         Gson gson,
         Clock clock,
-        double modelDesiredSizePercentage,
-        double modelMaxSizePercentage,
         int rcfNumTrees,
         int rcfNumSamplesInTree,
         double rcfTimeDecay,
@@ -169,17 +163,16 @@ public class ModelManager {
         int minPreviewSize,
         Duration modelTtl,
         Duration checkpointInterval,
-        ClusterService clusterService
+        EntityColdStarter entityColdStarter,
+        ModelPartitioner modelPartitioner,
+        FeatureManager featureManager,
+        MemoryTracker memoryTracker
     ) {
 
-        this.nodeFilter = nodeFilter;
-        this.jvmService = jvmService;
         this.rcfSerde = rcfSerde;
         this.checkpointDao = checkpointDao;
         this.gson = gson;
         this.clock = clock;
-        this.modelDesiredSizePercentage = modelDesiredSizePercentage;
-        this.modelMaxSizePercentage = modelMaxSizePercentage;
         this.rcfNumTrees = rcfNumTrees;
         this.rcfNumSamplesInTree = rcfNumSamplesInTree;
         this.rcfTimeDecay = rcfTimeDecay;
@@ -195,10 +188,18 @@ public class ModelManager {
         this.modelTtl = modelTtl;
         this.checkpointInterval = checkpointInterval;
 
-        this.forests = new ConcurrentHashMap<>();
+        this.forests = new RCFMemoryAwareConcurrentHashmap<>(memoryTracker);
         this.thresholds = new ConcurrentHashMap<>();
 
-        clusterService.getClusterSettings().addSettingsUpdateConsumer(MODEL_MAX_SIZE_PERCENTAGE, it -> this.modelMaxSizePercentage = it);
+        this.entityColdStarter = entityColdStarter;
+        this.modelStateMeta = new ConcurrentHashMap<>();
+        this.modelPartitioner = modelPartitioner;
+        this.featureManager = featureManager;
+        this.memoryTracker = memoryTracker;
+
+        if (DEBUG) {
+            this.modelStateMeta = new ConcurrentHashMap<>();
+        }
     }
 
     /**
@@ -245,87 +246,6 @@ public class ModelManager {
     }
 
     /**
-     * Partitions a RCF model by forest size.
-     *
-     * A RCF model is first partitioned into desired size based on heap.
-     * If there are more partitions than the number of nodes in the cluster,
-     * the model is partitioned by the number of nodes and verified to
-     * ensure the size of a partition does not exceed the max size limit based on heap.
-     *
-     * @param forest RCF configuration, including forest size
-     * @param detectorId ID of the detector with no effects on partitioning
-     * @return a pair of number of partitions and size of a parition (number of trees)
-     * @throws LimitExceededException when there is no sufficient resource available
-     */
-    public Entry<Integer, Integer> getPartitionedForestSizes(RandomCutForest forest, String detectorId) {
-        long totalSize = estimateModelSize(forest);
-        long heapSize = jvmService.info().getMem().getHeapMax().getBytes();
-
-        // desired partitioning
-        long partitionSize = (long) (Math.min(heapSize * modelDesiredSizePercentage, totalSize));
-        int numPartitions = (int) Math.ceil((double) totalSize / (double) partitionSize);
-        int forestSize = (int) Math.ceil((double) forest.getNumberOfTrees() / (double) numPartitions);
-
-        int numNodes = nodeFilter.getEligibleDataNodes().length;
-        if (numPartitions > numNodes) {
-            // partition by cluster size
-            partitionSize = (long) Math.ceil((double) totalSize / (double) numNodes);
-            long maxPartitionSize = (long) (heapSize * modelMaxSizePercentage);
-            // verify against max size limit
-            if (partitionSize <= maxPartitionSize) {
-                numPartitions = numNodes;
-                forestSize = (int) Math.ceil((double) forest.getNumberOfTrees() / (double) numNodes);
-            } else {
-                throw new LimitExceededException(detectorId, CommonErrorMessages.MEMORY_LIMIT_EXCEEDED_ERR_MSG);
-            }
-        }
-
-        return new SimpleImmutableEntry<>(numPartitions, forestSize);
-    }
-
-    /**
-     * Construct a RCF model and then partition it by forest size.
-     *
-     * A RCF model is constructed based on the number of input features.
-     *
-     * Then a RCF model is first partitioned into desired size based on heap.
-     * If there are more partitions than the number of nodes in the cluster,
-     * the model is partitioned by the number of nodes and verified to
-     * ensure the size of a partition does not exceed the max size limit based on heap.
-     *
-     * @param detector detector object
-     * @return a pair of number of partitions and size of a parition (number of trees)
-     * @throws LimitExceededException when there is no sufficient resource available
-     */
-    public Entry<Integer, Integer> getPartitionedForestSizes(AnomalyDetector detector) {
-        int shingleSize = detector.getShingleSize();
-        String detectorId = detector.getDetectorId();
-        int rcfNumFeatures = detector.getEnabledFeatureIds().size() * shingleSize;
-        return getPartitionedForestSizes(
-            RandomCutForest
-                .builder()
-                .dimensions(rcfNumFeatures)
-                .sampleSize(rcfNumSamplesInTree)
-                .numberOfTrees(rcfNumTrees)
-                .outputAfter(rcfNumSamplesInTree)
-                .parallelExecutionEnabled(false)
-                .build(),
-            detectorId
-        );
-    }
-
-    /**
-     * Gets the estimated size of a RCF model.
-     *
-     * @param forest RCF configuration
-     * @return estimated model size in bytes
-     */
-    public long estimateModelSize(RandomCutForest forest) {
-        return (long) forest.getNumberOfTrees() * (long) forest.getSampleSize() * BOUNDING_BOXES * VECTORS_IN_BOUNDING_BOX * forest
-            .getDimensions() * (Long.SIZE / Byte.SIZE);
-    }
-
-    /**
      * Returns to listener the RCF anomaly result using the specified model.
      *
      * @param detectorId ID of the detector
@@ -361,8 +281,8 @@ public class ModelManager {
     private Optional<ModelState<RandomCutForest>> restoreCheckpoint(Optional<String> rcfCheckpoint, String modelId, String detectorId) {
         return rcfCheckpoint
             .map(checkpoint -> AccessController.doPrivileged((PrivilegedAction<RandomCutForest>) () -> rcfSerde.fromJson(checkpoint)))
-            .filter(rcf -> isHostingAllowed(detectorId, rcf))
-            .map(rcf -> new ModelState<>(rcf, modelId, detectorId, ModelType.RCF.getName(), clock.instant()));
+            .filter(rcf -> memoryTracker.isHostingAllowed(detectorId, rcf))
+            .map(rcf -> ModelState.createClassicModelState(rcf, modelId, detectorId, ModelType.RCF.getName(), clock));
     }
 
     private void processRcfCheckpoint(
@@ -436,7 +356,7 @@ public class ModelManager {
             threshold.update(score);
         }
         modelState.setLastUsedTime(clock.instant());
-        listener.onResponse(new ThresholdingResult(grade, confidence));
+        listener.onResponse(new ThresholdingResult(grade, confidence, score));
     }
 
     private void processThresholdCheckpoint(
@@ -452,7 +372,7 @@ public class ModelManager {
                 checkpoint -> AccessController
                     .doPrivileged((PrivilegedAction<ThresholdingModel>) () -> gson.fromJson(checkpoint, thresholdingModelClass))
             )
-            .map(threshold -> new ModelState<>(threshold, modelId, detectorId, ModelType.THRESHOLD.getName(), clock.instant()));
+            .map(threshold -> ModelState.createClassicModelState(threshold, modelId, detectorId, ModelType.THRESHOLD.getName(), clock));
         if (model.isPresent()) {
             thresholds.put(modelId, model.get());
             getThresholdingResult(model.get(), score, listener);
@@ -568,6 +488,7 @@ public class ModelManager {
         clearModels(detectorId, forests, ActionListener.wrap(r -> clearModels(detectorId, thresholds, listener), listener::onFailure));
     }
 
+    // TODO: we don't need to do iteration as this is a map.
     private void clearModels(String detectorId, Map<String, ?> models, ActionListener<Void> listener) {
         Iterator<String> id = models.keySet().iterator();
         clearModelForIterator(detectorId, models, id, listener);
@@ -626,7 +547,7 @@ public class ModelManager {
         int rcfNumFeatures = dataPoints[0].length;
 
         // Create partitioned RCF models
-        Entry<Integer, Integer> partitionResults = getPartitionedForestSizes(anomalyDetector);
+        Entry<Integer, Integer> partitionResults = modelPartitioner.getPartitionedForestSizes(anomalyDetector);
 
         int numForests = partitionResults.getKey();
         int forestSize = partitionResults.getValue();
@@ -646,7 +567,7 @@ public class ModelManager {
                 scores[j] += rcf.getAnomalyScore(dataPoints[j]);
                 rcf.update(dataPoints[j]);
             }
-            String modelId = getRcfModelId(anomalyDetector.getDetectorId(), i);
+            String modelId = modelPartitioner.getRcfModelId(anomalyDetector.getDetectorId(), i);
             String checkpoint = AccessController.doPrivileged((PrivilegedAction<String>) () -> rcfSerde.toJson(rcf));
             checkpointDao.putModelCheckpoint(modelId, checkpoint);
         }
@@ -665,7 +586,7 @@ public class ModelManager {
         threshold.train(scores);
 
         // Persist thresholding model
-        String modelId = getThresholdModelId(anomalyDetector.getDetectorId());
+        String modelId = modelPartitioner.getThresholdModelId(anomalyDetector.getDetectorId());
         String checkpoint = AccessController.doPrivileged((PrivilegedAction<String>) () -> gson.toJson(threshold));
         checkpointDao.putModelCheckpoint(modelId, checkpoint);
     }
@@ -692,17 +613,18 @@ public class ModelManager {
             int rcfNumFeatures = dataPoints[0].length;
             // creates partitioned RCF models
             try {
-                Entry<Integer, Integer> partitionResults = getPartitionedForestSizes(
-                    RandomCutForest
-                        .builder()
-                        .dimensions(rcfNumFeatures)
-                        .sampleSize(rcfNumSamplesInTree)
-                        .numberOfTrees(rcfNumTrees)
-                        .outputAfter(rcfNumSamplesInTree)
-                        .parallelExecutionEnabled(false)
-                        .build(),
-                    anomalyDetector.getDetectorId()
-                );
+                Entry<Integer, Integer> partitionResults = modelPartitioner
+                    .getPartitionedForestSizes(
+                        RandomCutForest
+                            .builder()
+                            .dimensions(rcfNumFeatures)
+                            .sampleSize(rcfNumSamplesInTree)
+                            .numberOfTrees(rcfNumTrees)
+                            .outputAfter(rcfNumSamplesInTree)
+                            .parallelExecutionEnabled(false)
+                            .build(),
+                        anomalyDetector.getDetectorId()
+                    );
                 int numForests = partitionResults.getKey();
                 int forestSize = partitionResults.getValue();
                 double[] scores = new double[dataPoints.length];
@@ -738,7 +660,7 @@ public class ModelManager {
                 scores[j] += rcf.getAnomalyScore(dataPoints[j]);
                 rcf.update(dataPoints[j]);
             }
-            String modelId = getRcfModelId(detector.getDetectorId(), step);
+            String modelId = modelPartitioner.getRcfModelId(detector.getDetectorId(), step);
             String checkpoint = AccessController.doPrivileged((PrivilegedAction<String>) () -> rcfSerde.toJson(rcf));
             checkpointDao
                 .putModelCheckpoint(
@@ -774,31 +696,10 @@ public class ModelManager {
             threshold.train(rcfScores);
 
             // Persist thresholding model
-            String modelId = getThresholdModelId(detector.getDetectorId());
+            String modelId = modelPartitioner.getThresholdModelId(detector.getDetectorId());
             String checkpoint = AccessController.doPrivileged((PrivilegedAction<String>) () -> gson.toJson(threshold));
             checkpointDao.putModelCheckpoint(modelId, checkpoint, ActionListener.wrap(r -> listener.onResponse(null), listener::onFailure));
         }
-    }
-
-    /**
-     * Returns the model ID for the RCF model partition.
-     *
-     * @param detectorId ID of the detector for which the RCF model is trained
-     * @param partitionNumber number of the partition
-     * @return ID for the RCF model partition
-     */
-    public String getRcfModelId(String detectorId, int partitionNumber) {
-        return String.format(RCF_MODEL_ID_PATTERN, detectorId, partitionNumber);
-    }
-
-    /**
-     * Returns the model ID for the thresholding model.
-     *
-     * @param detectorId ID of the detector for which the thresholding model is trained
-     * @return ID for the thresholding model
-     */
-    public String getThresholdModelId(String detectorId) {
-        return String.format(THRESHOLD_MODEL_ID_PATTERN, detectorId);
     }
 
     private void clearModels(String detectorId, Map<String, ?> models) {
@@ -806,19 +707,6 @@ public class ModelManager {
             models.remove(modelId);
             checkpointDao.deleteModelCheckpoint(modelId);
         });
-    }
-
-    private boolean isHostingAllowed(String detectorId, RandomCutForest rcf) {
-        long total = forests.values().stream().mapToLong(f -> estimateModelSize(f.getModel())).sum() + estimateModelSize(rcf);
-        double heapLimit = jvmService.info().getMem().getHeapMax().getBytes() * modelMaxSizePercentage;
-        if (total <= heapLimit) {
-            return true;
-        } else {
-            throw new LimitExceededException(
-                detectorId,
-                String.format("Exceeded memory limit. New size is %d bytes and max limit is %f bytes", total, heapLimit)
-            );
-        }
     }
 
     private String toCheckpoint(RandomCutForest forest) {
@@ -892,7 +780,7 @@ public class ModelManager {
             String modelId = modelEntry.getKey();
             ModelState<T> modelState = modelEntry.getValue();
             Instant now = clock.instant();
-            if (modelState.getLastUsedTime().plus(modelTtl).isBefore(now)) {
+            if (modelState.expired(modelTtl)) {
                 models.remove(modelId);
             }
             if (modelState.getLastCheckpointTime().plus(checkpointInterval).isBefore(now)) {
@@ -954,7 +842,7 @@ public class ModelManager {
         return Arrays.stream(dataPoints).map(point -> {
             double rcfScore = forest.getAnomalyScore(point);
             forest.update(point);
-            ThresholdingResult result = new ThresholdingResult(threshold.grade(rcfScore), threshold.confidence());
+            ThresholdingResult result = new ThresholdingResult(threshold.grade(rcfScore), threshold.confidence(), rcfScore);
             threshold.update(rcfScore);
             return result;
         }).collect(Collectors.toList());
@@ -987,7 +875,7 @@ public class ModelManager {
             .entrySet()
             .stream()
             .filter(entry -> getDetectorIdForModelId(entry.getKey()).equals(detectorId))
-            .forEach(entry -> { res.put(entry.getKey(), estimateModelSize(entry.getValue().getModel())); });
+            .forEach(entry -> { res.put(entry.getKey(), memoryTracker.estimateModelSize(entry.getValue().getModel())); });
         thresholds
             .entrySet()
             .stream()
@@ -1013,6 +901,142 @@ public class ModelManager {
                     ActionListener.wrap(checkpoint -> processRcfCheckpoint(checkpoint, modelId, detectorId, listener), listener::onFailure)
                 );
         }
+    }
 
+    /**
+     * Compute anomaly result for the given data point
+     * @param detectorId Detector Id
+     * @param datapoint Data point
+     * @param entityName entity's name like "server_1"
+     * @param modelState the state associated with the entity
+     * @param modelId the model Id
+     * @return anomaly result, confidence, and the corresponding RCF score.
+     */
+    public ThresholdingResult getAnomalyResultForEntity(
+        String detectorId,
+        double[] datapoint,
+        String entityName,
+        ModelState<EntityModel> modelState,
+        String modelId
+    ) {
+        ThresholdingResult result = null;
+
+        if (DEBUG) {
+            // create the entity meta if not exists
+            modelStateMeta.computeIfAbsent(modelId, k -> new ModelStateMeta());
+        }
+        if (modelState != null) {
+            EntityModel model = modelState.getModel();
+            Queue<double[]> samples = model.getSamples();
+            samples.add(datapoint);
+            if (samples.size() > this.rcfNumMinSamples) {
+                samples.remove();
+            }
+
+            result = maybeTrainBeforeScore(modelState, entityName);
+        } else {
+            result = new ThresholdingResult(0, 0, 0);
+        }
+
+        return result;
+    }
+
+    private ThresholdingResult score(Queue<double[]> samples, String modelId, ModelState<EntityModel> modelState) {
+        EntityModel model = modelState.getModel();
+        RandomCutForest rcf = model.getRcf();
+        ThresholdingModel threshold = model.getThreshold();
+
+        double lastRcfScore = 0;
+        while (samples.peek() != null) {
+            double[] feature = samples.poll();
+            lastRcfScore = rcf.getAnomalyScore(feature);
+            rcf.update(feature);
+            threshold.update(lastRcfScore);
+        }
+
+        double anomalyGrade = threshold.grade(lastRcfScore);
+        double anomalyConfidence = computeRcfConfidence(rcf) * threshold.confidence();
+        ThresholdingResult result = new ThresholdingResult(anomalyGrade, anomalyConfidence, lastRcfScore);
+
+        if (DEBUG) {
+            ModelStateMeta meta = modelStateMeta.computeIfAbsent(modelId, k -> new ModelStateMeta());
+            if (!meta.isInitialized() && lastRcfScore > 0) {
+                logger
+                    .info(
+                        "Preparing entity {} takes {} seconds",
+                        modelState.getModelId(),
+                        Duration.between(meta.getCreatedTime(), clock.instant()).getSeconds()
+                    );
+                meta.setInitialized(true);
+            }
+
+        }
+
+        modelState.setLastUsedTime(clock.instant());
+        return result;
+    }
+
+    /**
+     * Create model Id out of detector Id and entity name
+     * @param detectorId Detector Id
+     * @param entityValue Entity's value
+     * @return The model Id
+     */
+    public String getEntityModelId(String detectorId, String entityValue) {
+        return detectorId + "-" + entityValue;
+    }
+
+    /**
+     * Instantiate an entity state out of checkpoint.  Running cold start if the
+     * model is empty. Update models using recent samples if applicable.
+     * @param checkpoint Checkpoint loaded from index
+     * @param modelId Model Id
+     * @param entityName Entity's name
+     * @param modelState entity state to instantiate
+     */
+    public void processEntityCheckpoint(
+        Optional<Entry<EntityModel, Instant>> checkpoint,
+        String modelId,
+        String entityName,
+        ModelState<EntityModel> modelState
+    ) {
+        if (checkpoint.isPresent()) {
+            Entry<EntityModel, Instant> modelToTime = checkpoint.get();
+            modelState.setModel(modelToTime.getKey());
+            modelState.setLastCheckpointTime(modelToTime.getValue());
+        }
+
+        EntityModel model = modelState.getModel();
+        assert (model != null);
+        maybeTrainBeforeScore(modelState, entityName);
+    }
+
+    /**
+     * Infer whenever both models are not null and do cold start if one of the models is not there
+     * @param modelState Model State
+     * @param entityName The entity's name
+     * @return model inference result for the entity, return all 0 Thresholding
+     *  result if the models are not ready
+     */
+    private ThresholdingResult maybeTrainBeforeScore(ModelState<EntityModel> modelState, String entityName) {
+        EntityModel model = modelState.getModel();
+        Queue<double[]> samples = model.getSamples();
+        String modelId = model.getModelId();
+        String detectorId = modelState.getDetectorId();
+        ThresholdingResult result = null;
+        if (model.getRcf() == null || model.getThreshold() == null) {
+            // TODO: only load models to cache if they finish training. It is not easy to do
+            // now as we bundle the decision of admitting a model to cache with training result.
+            // This blurred the boundary between two different components and tightly coupled
+            // them together. Not a good practice.
+            // we also have to deal with the samples from training and from AD job run together.
+            entityColdStarter.trainModel(samples, modelId, entityName, detectorId, modelState);
+        }
+
+        // update models using recent samples
+        if (model.getRcf() != null && model.getThreshold() != null && result == null) {
+            return score(samples, modelId, modelState);
+        }
+        return new ThresholdingResult(0, 0, 0);
     }
 }

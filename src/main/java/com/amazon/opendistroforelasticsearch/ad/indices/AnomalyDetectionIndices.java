@@ -344,6 +344,7 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
             .local(true)
             .indicesOptions(IndicesOptions.strictExpand());
 
+        // TODO: delete if free disk percentages is reaching floodgate
         adminClient.cluster().state(clusterStateRequest, ActionListener.wrap(clusterStateResponse -> {
             String latestToDelete = null;
             long latest = Long.MIN_VALUE;

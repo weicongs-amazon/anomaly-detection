@@ -56,8 +56,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultRequest;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultResponse;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultTransportAction;
-import com.amazon.opendistroforelasticsearch.ad.transport.handler.AnomalyIndexHandler;
 import com.amazon.opendistroforelasticsearch.ad.transport.handler.DetectionStateHandler;
+import com.amazon.opendistroforelasticsearch.ad.transport.handler.MultitiEntityResultHandler;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.jobscheduler.spi.JobExecutionContext;
 import com.amazon.opendistroforelasticsearch.jobscheduler.spi.LockModel;
@@ -78,7 +78,7 @@ public class AnomalyDetectorJobRunner implements ScheduledJobRunner {
     private Client client;
     private ClientUtil clientUtil;
     private ThreadPool threadPool;
-    private AnomalyIndexHandler<AnomalyResult> anomalyResultHandler;
+    private MultitiEntityResultHandler anomalyResultHandler;
     private ConcurrentHashMap<String, Integer> detectorEndRunExceptionCount;
     private DetectionStateHandler detectionStateHandler;
 
@@ -112,7 +112,7 @@ public class AnomalyDetectorJobRunner implements ScheduledJobRunner {
         this.threadPool = threadPool;
     }
 
-    public void setAnomalyResultHandler(AnomalyIndexHandler<AnomalyResult> anomalyResultHandler) {
+    public void setAnomalyResultHandler(MultitiEntityResultHandler anomalyResultHandler) {
         this.anomalyResultHandler = anomalyResultHandler;
     }
 
@@ -422,6 +422,14 @@ public class AnomalyDetectorJobRunner implements ScheduledJobRunner {
         String detectorId = jobParameter.getName();
         detectorEndRunExceptionCount.remove(detectorId);
         try {
+            // skipping writing to the result index if not necessary
+            // For a single-entity detector, the result is not useful if error is null
+            // and rcf score (thus anomaly grade/confidence) is null.
+            // For a multi-entity detector, we don't need to save on the detector level.
+            // We always return 0 rcf score if there is no error.
+            if (response.getError() == null && response.getAnomalyScore() == 0) {
+                return;
+            }
             IntervalTimeConfiguration windowDelay = (IntervalTimeConfiguration) ((AnomalyDetectorJob) jobParameter).getWindowDelay();
             Instant dataStartTime = detectionStartTime.minus(windowDelay.getInterval(), windowDelay.getUnit());
             Instant dataEndTime = executionStartTime.minus(windowDelay.getInterval(), windowDelay.getUnit());

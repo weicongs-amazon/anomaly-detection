@@ -61,7 +61,6 @@ import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultTests;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.IndexUtils;
 import com.amazon.opendistroforelasticsearch.ad.util.Throttler;
-import com.amazon.opendistroforelasticsearch.ad.util.ThrowingConsumerWrapper;
 
 public class AnomalyResultHandlerTests extends AbstractADTest {
     private static Settings settings;
@@ -133,14 +132,11 @@ public class AnomalyResultHandlerTests extends AbstractADTest {
             listener.onResponse(mock(IndexResponse.class));
             return null;
         }).when(client).index(any(IndexRequest.class), ArgumentMatchers.<ActionListener<IndexResponse>>any());
-        AnomalyIndexHandler<AnomalyResult> handler = new AnomalyIndexHandler<AnomalyResult>(
+        MultitiEntityResultHandler handler = new MultitiEntityResultHandler(
             client,
             settings,
             threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
+            anomalyDetectionIndices,
             clientUtil,
             indexUtil,
             clusterService
@@ -171,14 +167,11 @@ public class AnomalyResultHandlerTests extends AbstractADTest {
     @Test
     public void testIndexWriteBlock() {
         setWriteBlockAdResultIndex(true);
-        AnomalyIndexHandler<AnomalyResult> handler = new AnomalyIndexHandler<AnomalyResult>(
+        MultitiEntityResultHandler handler = new MultitiEntityResultHandler(
             client,
             settings,
             threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
+            anomalyDetectionIndices,
             clientUtil,
             indexUtil,
             clusterService
@@ -191,14 +184,11 @@ public class AnomalyResultHandlerTests extends AbstractADTest {
     @Test
     public void testAdResultIndexExist() throws IOException {
         setInitAnomalyResultIndexException(true);
-        AnomalyIndexHandler<AnomalyResult> handler = new AnomalyIndexHandler<AnomalyResult>(
+        MultitiEntityResultHandler handler = new MultitiEntityResultHandler(
             client,
             settings,
             threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
+            anomalyDetectionIndices,
             clientUtil,
             indexUtil,
             clusterService
@@ -213,14 +203,11 @@ public class AnomalyResultHandlerTests extends AbstractADTest {
         expectedEx.expectMessage("Error in saving .opendistro-anomaly-results for detector " + detectorId);
 
         setInitAnomalyResultIndexException(false);
-        AnomalyIndexHandler<AnomalyResult> handler = new AnomalyIndexHandler<AnomalyResult>(
+        MultitiEntityResultHandler handler = new MultitiEntityResultHandler(
             client,
             settings,
             threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
+            anomalyDetectionIndices,
             clientUtil,
             indexUtil,
             clusterService
@@ -292,14 +279,11 @@ public class AnomalyResultHandlerTests extends AbstractADTest {
             .put("opendistro.anomaly_detection.backoff_initial_delay", TimeValue.timeValueMillis(1))
             .build();
 
-        AnomalyIndexHandler<AnomalyResult> handler = new AnomalyIndexHandler<AnomalyResult>(
+        MultitiEntityResultHandler handler = new MultitiEntityResultHandler(
             client,
             backoffSettings,
             threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
+            anomalyDetectionIndices,
             clientUtil,
             indexUtil,
             clusterService

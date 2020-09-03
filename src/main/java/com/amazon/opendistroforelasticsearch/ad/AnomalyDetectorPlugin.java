@@ -20,6 +20,7 @@ import static java.util.Collections.unmodifiableList;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -36,6 +37,7 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.inject.Module;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.IndexScopedSettings;
@@ -64,6 +66,10 @@ import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.watcher.ResourceWatcherService;
 
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
+import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
+import com.amazon.opendistroforelasticsearch.ad.caching.DoorKeeper;
+import com.amazon.opendistroforelasticsearch.ad.caching.EntityCache;
+import com.amazon.opendistroforelasticsearch.ad.caching.PriorityCache;
 import com.amazon.opendistroforelasticsearch.ad.cluster.ADClusterEventListener;
 import com.amazon.opendistroforelasticsearch.ad.cluster.HashRing;
 import com.amazon.opendistroforelasticsearch.ad.cluster.MasterEventListener;
@@ -76,8 +82,10 @@ import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao;
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.ml.CheckpointDao;
+import com.amazon.opendistroforelasticsearch.ad.ml.EntityColdStarter;
 import com.amazon.opendistroforelasticsearch.ad.ml.HybridThresholdingModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
+import com.amazon.opendistroforelasticsearch.ad.ml.ModelPartitioner;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
@@ -107,6 +115,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.CronAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.CronTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.DeleteModelAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.DeleteModelTransportAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.EntityResultAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.EntityResultTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.ProfileAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.ProfileTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.RCFPollingAction;
@@ -121,9 +131,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.StopDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.StopDetectorTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.ThresholdResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.ThresholdResultTransportAction;
-import com.amazon.opendistroforelasticsearch.ad.transport.TransportStateManager;
-import com.amazon.opendistroforelasticsearch.ad.transport.handler.AnomalyIndexHandler;
 import com.amazon.opendistroforelasticsearch.ad.transport.handler.DetectionStateHandler;
+import com.amazon.opendistroforelasticsearch.ad.transport.handler.MultitiEntityResultHandler;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 import com.amazon.opendistroforelasticsearch.ad.util.IndexUtils;
@@ -158,6 +167,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
     private DiscoveryNodeFilterer nodeFilter;
     private IndexUtils indexUtils;
     private DetectionStateHandler detectorStateHandler;
+    private MultitiEntityResultHandler anomalyResultHandler;
 
     static {
         SpecialPermission.check();
@@ -178,21 +188,6 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-
-        AnomalyIndexHandler<AnomalyResult> anomalyResultHandler;
-        anomalyResultHandler = new AnomalyIndexHandler<AnomalyResult>(
-            client,
-            settings,
-            threadPool,
-            AnomalyResult.ANOMALY_RESULT_INDEX,
-            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initAnomalyResultIndexDirectly),
-            anomalyDetectionIndices::doesAnomalyResultIndexExist,
-            false,
-            this.clientUtil,
-            this.indexUtils,
-            clusterService
-        );
-
         AnomalyDetectorJobRunner jobRunner = AnomalyDetectorJobRunner.getJobRunnerInstance();
         jobRunner.setClient(client);
         jobRunner.setClientUtil(clientUtil);
@@ -268,8 +263,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         this.client = client;
         this.threadPool = threadPool;
         Settings settings = environment.settings();
-        Clock clock = Clock.systemUTC();
-        Throttler throttler = new Throttler(clock);
+        Throttler throttler = new Throttler(getClock());
         this.clientUtil = new ClientUtil(settings, client, throttler, threadPool);
         this.indexUtils = new IndexUtils(client, clientUtil, clusterService, indexNameExpressionResolver);
         anomalyDetectionIndices = new AnomalyDetectionIndices(client, clusterService, threadPool, settings);
@@ -279,23 +273,105 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         SingleFeatureLinearUniformInterpolator singleFeatureLinearUniformInterpolator =
             new IntegerSensitiveSingleFeatureLinearUniformInterpolator();
         Interpolator interpolator = new LinearUniformInterpolator(singleFeatureLinearUniformInterpolator);
-        SearchFeatureDao searchFeatureDao = new SearchFeatureDao(client, xContentRegistry, interpolator, clientUtil);
+        SearchFeatureDao searchFeatureDao = new SearchFeatureDao(
+            client,
+            xContentRegistry,
+            interpolator,
+            clientUtil,
+            threadPool,
+            settings,
+            clusterService
+        );
 
         JvmService jvmService = new JvmService(environment.settings());
         RandomCutForestSerDe rcfSerde = new RandomCutForestSerDe();
-        CheckpointDao checkpoint = new CheckpointDao(client, clientUtil, CommonName.CHECKPOINT_INDEX_NAME);
+        CheckpointDao checkpoint = new CheckpointDao(
+            client,
+            clientUtil,
+            CommonName.CHECKPOINT_INDEX_NAME,
+            gson,
+            rcfSerde,
+            HybridThresholdingModel.class,
+            getClock(),
+            AnomalyDetectorSettings.HOURLY_MAINTENANCE
+        );
 
         this.nodeFilter = new DiscoveryNodeFilterer(this.clusterService);
 
-        ModelManager modelManager = new ModelManager(
-            nodeFilter,
+        double modelMaxSizePercent = AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE.get(settings);
+
+        MemoryTracker memoryTracker = new MemoryTracker(
             jvmService,
+            modelMaxSizePercent,
+            AnomalyDetectorSettings.DESIRED_MODEL_SIZE_PERCENTAGE,
+            clusterService,
+            AnomalyDetectorSettings.NUM_SAMPLES_PER_TREE
+        );
+
+        ModelPartitioner modelPartitioner = new ModelPartitioner(
+            AnomalyDetectorSettings.NUM_SAMPLES_PER_TREE,
+            AnomalyDetectorSettings.NUM_TREES,
+            nodeFilter,
+            memoryTracker
+        );
+
+        NodeStateManager stateManager = new NodeStateManager(
+            client,
+            xContentRegistry,
+            settings,
+            clientUtil,
+            getClock(),
+            AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+            modelPartitioner
+        );
+
+        FeatureManager featureManager = new FeatureManager(
+            searchFeatureDao,
+            interpolator,
+            getClock(),
+            AnomalyDetectorSettings.MAX_TRAIN_SAMPLE,
+            AnomalyDetectorSettings.MAX_SAMPLE_STRIDE,
+            AnomalyDetectorSettings.TRAIN_SAMPLE_TIME_RANGE_IN_HOURS,
+            AnomalyDetectorSettings.MIN_TRAIN_SAMPLES,
+            AnomalyDetectorSettings.MAX_SHINGLE_PROPORTION_MISSING,
+            AnomalyDetectorSettings.MAX_IMPUTATION_NEIGHBOR_DISTANCE,
+            AnomalyDetectorSettings.PREVIEW_SAMPLE_RATE,
+            AnomalyDetectorSettings.MAX_PREVIEW_SAMPLES,
+            AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+            threadPool,
+            AD_THREAD_POOL_NAME
+        );
+
+        EntityColdStarter entityColdStarter = new EntityColdStarter(
+            getClock(),
+            threadPool,
+            stateManager,
+            AnomalyDetectorSettings.NUM_SAMPLES_PER_TREE,
+            AnomalyDetectorSettings.MULTI_ENTITY_NUM_TREES,
+            AnomalyDetectorSettings.TIME_DECAY,
+            AnomalyDetectorSettings.NUM_MIN_SAMPLES,
+            AnomalyDetectorSettings.MAX_SAMPLE_STRIDE,
+            AnomalyDetectorSettings.MAX_TRAIN_SAMPLE,
+            interpolator,
+            searchFeatureDao,
+            AnomalyDetectorSettings.DEFAULT_MULTI_ENTITY_SHINGLE,
+            AnomalyDetectorSettings.THRESHOLD_MIN_PVALUE,
+            AnomalyDetectorSettings.THRESHOLD_MAX_RANK_ERROR,
+            AnomalyDetectorSettings.THRESHOLD_MAX_SCORE,
+            AnomalyDetectorSettings.THRESHOLD_NUM_LOGNORMAL_QUANTILES,
+            AnomalyDetectorSettings.THRESHOLD_DOWNSAMPLES,
+            AnomalyDetectorSettings.THRESHOLD_MAX_SAMPLES,
+            featureManager,
+            AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+            AnomalyDetectorSettings.MAX_SMALL_STATES,
+            checkpoint
+        );
+
+        ModelManager modelManager = new ModelManager(
             rcfSerde,
             checkpoint,
             gson,
-            clock,
-            AnomalyDetectorSettings.DESIRED_MODEL_SIZE_PERCENTAGE,
-            AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE.get(settings),
+            getClock(),
             AnomalyDetectorSettings.NUM_TREES,
             AnomalyDetectorSettings.NUM_SAMPLES_PER_TREE,
             AnomalyDetectorSettings.TIME_DECAY,
@@ -310,35 +386,49 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             AnomalyDetectorSettings.MIN_PREVIEW_SIZE,
             AnomalyDetectorSettings.HOURLY_MAINTENANCE,
             AnomalyDetectorSettings.HOURLY_MAINTENANCE,
-            clusterService
+            entityColdStarter,
+            modelPartitioner,
+            featureManager,
+            memoryTracker
         );
 
-        HashRing hashRing = new HashRing(nodeFilter, clock, settings);
-        TransportStateManager stateManager = new TransportStateManager(
-            client,
-            xContentRegistry,
+        // EntityCache cache = new LRUCache(
+        // checkpoint,
+        // AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+        // AnomalyDetectorSettings.MAX_ACTIVE_STATES,
+        // modelManager,
+        // getClock()
+        // );
+
+        DoorKeeper doorKeeper = new DoorKeeper(
+            AnomalyDetectorSettings.DOOR_KEEPER_MAX_INSERTION,
+            AnomalyDetectorSettings.DOOR_KEEPER_FAULSE_POSITIVE_RATE,
+            AnomalyDetectorSettings.DOOR_KEEPER_FLOOD_GATE_DELTA
+        );
+
+        EntityCache cache = new PriorityCache(
+            checkpoint,
+            AnomalyDetectorSettings.DEDICATED_CACHE_SIZE,
+            stateManager,
+            AnomalyDetectorSettings.CHECKPOINT_TTL,
+            AnomalyDetectorSettings.MAX_INACTIVE_ENTITIES_PERCENT,
+            AnomalyDetectorSettings.MAX_INACTIVE_ENTITIY_STATE_BYTES,
+            jvmService,
+            modelMaxSizePercent,
+            memoryTracker,
             modelManager,
-            settings,
-            clientUtil,
-            clock,
-            AnomalyDetectorSettings.HOURLY_MAINTENANCE
-        );
-        FeatureManager featureManager = new FeatureManager(
-            searchFeatureDao,
-            interpolator,
-            clock,
-            AnomalyDetectorSettings.MAX_TRAIN_SAMPLE,
-            AnomalyDetectorSettings.MAX_SAMPLE_STRIDE,
-            AnomalyDetectorSettings.TRAIN_SAMPLE_TIME_RANGE_IN_HOURS,
-            AnomalyDetectorSettings.MIN_TRAIN_SAMPLES,
-            AnomalyDetectorSettings.MAX_SHINGLE_PROPORTION_MISSING,
-            AnomalyDetectorSettings.MAX_IMPUTATION_NEIGHBOR_DISTANCE,
-            AnomalyDetectorSettings.PREVIEW_SAMPLE_RATE,
-            AnomalyDetectorSettings.MAX_PREVIEW_SAMPLES,
+            AnomalyDetectorSettings.MULTI_ENTITY_NUM_TREES,
+            getClock(),
+            doorKeeper,
+            clusterService,
             AnomalyDetectorSettings.HOURLY_MAINTENANCE,
-            threadPool,
-            AD_THREAD_POOL_NAME
+            AnomalyDetectorSettings.NUM_MIN_SAMPLES
         );
+
+        CacheProvider cacheProvider = new CacheProvider(cache);
+
+        HashRing hashRing = new HashRing(nodeFilter, getClock(), settings);
+
         anomalyDetectorRunner = new AnomalyDetectorRunner(modelManager, featureManager, AnomalyDetectorSettings.MAX_PREVIEW_RESULTS);
 
         Map<String, ADStat<?>> stats = ImmutableMap
@@ -376,6 +466,18 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             stateManager
         );
 
+        anomalyResultHandler = new MultitiEntityResultHandler(
+            client,
+            settings,
+            threadPool,
+            anomalyDetectionIndices,
+            this.clientUtil,
+            this.indexUtils,
+            clusterService
+        );
+
+        // return objects used by Guice to inject dependencies for e.g.,
+        // transport action handler constructors
         return ImmutableList
             .of(
                 anomalyDetectionIndices,
@@ -388,15 +490,36 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 hashRing,
                 featureManager,
                 modelManager,
-                clock,
                 stateManager,
                 new ADClusterEventListener(clusterService, hashRing, modelManager, nodeFilter),
                 adCircuitBreakerService,
                 adStats,
-                new MasterEventListener(clusterService, threadPool, client, clock, clientUtil, nodeFilter),
+                new MasterEventListener(clusterService, threadPool, client, getClock(), clientUtil, nodeFilter),
                 nodeFilter,
-                detectorStateHandler
+                detectorStateHandler,
+                anomalyResultHandler,
+                checkpoint,
+                modelPartitioner,
+                cacheProvider,
+                doorKeeper
             );
+    }
+
+    /**
+     * createComponents doesn't work for Clock as ES process cannot start
+     * complaining it cannot find Clock instances for transport actions constructors.
+     * @return a UTC clock
+     */
+    protected Clock getClock() {
+        return Clock.systemUTC();
+    }
+
+    @Override
+    public Collection<Module> createGuiceModules() {
+        List<Module> modules = new ArrayList<>();
+        modules.add(b -> b.bind(Clock.class).toInstance(getClock()));
+
+        return modules;
     }
 
     @Override
@@ -419,7 +542,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
 
         List<Setting<?>> systemSetting = ImmutableList
             .of(
-                AnomalyDetectorSettings.MAX_ANOMALY_DETECTORS,
+                AnomalyDetectorSettings.MAX_SINGLE_ENTITY_ANOMALY_DETECTORS,
+                AnomalyDetectorSettings.MAX_MULTI_ENTITY_ANOMALY_DETECTORS,
                 AnomalyDetectorSettings.MAX_ANOMALY_FEATURES,
                 AnomalyDetectorSettings.REQUEST_TIMEOUT,
                 AnomalyDetectorSettings.DETECTION_INTERVAL,
@@ -433,7 +557,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.BACKOFF_INITIAL_DELAY,
                 AnomalyDetectorSettings.MAX_RETRY_FOR_BACKOFF,
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD,
-                AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE
+                AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE,
+                AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY
             );
         return unmodifiableList(Stream.concat(enabledSetting.stream(), systemSetting.stream()).collect(Collectors.toList()));
     }
@@ -466,7 +591,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 new ActionHandler<>(ProfileAction.INSTANCE, ProfileTransportAction.class),
                 new ActionHandler<>(RCFPollingAction.INSTANCE, RCFPollingTransportAction.class),
                 new ActionHandler<>(SearchAnomalyDetectorAction.INSTANCE, SearchAnomalyDetectorTransportAction.class),
-                new ActionHandler<>(SearchAnomalyResultAction.INSTANCE, SearchAnomalyResultTransportAction.class)
+                new ActionHandler<>(SearchAnomalyResultAction.INSTANCE, SearchAnomalyResultTransportAction.class),
+                new ActionHandler<>(EntityResultAction.INSTANCE, EntityResultTransportAction.class)
             );
     }
 

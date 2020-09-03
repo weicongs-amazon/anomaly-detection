@@ -27,8 +27,16 @@ public final class AnomalyDetectorSettings {
 
     private AnomalyDetectorSettings() {}
 
-    public static final Setting<Integer> MAX_ANOMALY_DETECTORS = Setting
+    public static final Setting<Integer> MAX_SINGLE_ENTITY_ANOMALY_DETECTORS = Setting
         .intSetting("opendistro.anomaly_detection.max_anomaly_detectors", 1000, Setting.Property.NodeScope, Setting.Property.Dynamic);
+
+    public static final Setting<Integer> MAX_MULTI_ENTITY_ANOMALY_DETECTORS = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_multi_entity_anomaly_detectors",
+            10,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
 
     public static final Setting<Integer> MAX_ANOMALY_FEATURES = Setting
         .intSetting("opendistro.anomaly_detection.max_anomaly_features", 5, Setting.Property.NodeScope, Setting.Property.Dynamic);
@@ -76,10 +84,10 @@ public final class AnomalyDetectorSettings {
     public static final Setting<Long> AD_RESULT_HISTORY_MAX_DOCS = Setting
         .longSetting(
             "opendistro.anomaly_detection.ad_result_history_max_docs",
-            // Suppose generally per cluster has 200 detectors and all run with 1 minute interval.
-            // We will get 288,000 AD result docs. So set it as 9000k to avoid multiple roll overs
-            // per day.
-            9_000_000L,
+            // Total documents in primary replica.
+            // A single feature result is roughly 150 bytes. Suppose a doc is
+            // of 200 bytes, 180 million docs is of 36 GB.
+            180_000_000L,
             0L,
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
@@ -214,4 +222,46 @@ public final class AnomalyDetectorSettings {
 
     // Thread pool
     public static final int AD_THEAD_POOL_QUEUE_SIZE = 1000;
+
+    // multi-entity caching
+    public static final int MAX_ACTIVE_STATES = 1000;
+
+    // the size of the cache for small states like last cold start time for an entity.
+    // At most, we have 10 multi-entity detector and each one can be hit by 1000 different entities each
+    // minute. Since these states' life time is hour, we keep its size 10 * 1000 = 10000.
+    public static final int MAX_SMALL_STATES = 10000;
+
+    // Multi-entity detector model setting:
+    // TODO (kaituo): change to 4
+    public static final int DEFAULT_MULTI_ENTITY_SHINGLE = 1;
+
+    public static final int MULTI_ENTITY_NUM_TREES = 10;
+
+    // cache related
+    public static final int DEDICATED_CACHE_SIZE = 10;
+
+    // We keep priority (4 bytes float) and recent samples (at most 128 double array,
+    // each array has at most 5 double since we limit at most 5 features.) At most,
+    // we have 5124 bytes per entry (ignoring data structure metadata). To keep
+    // 50k entries, we need 250 MB. In a 32 GB heap, the percentage is roughly 0.008.
+    public static final float MAX_INACTIVE_ENTITIES_PERCENT = 0.008f;
+    public static final int MAX_INACTIVE_ENTITIY_STATE_BYTES = 5124;
+
+    // TODO: do experiments to check how much does 1 million insertion costs in memory
+    public static final int DOOR_KEEPER_MAX_INSERTION = 1_000_000;
+
+    // At most, we have 10 multi-entity detector and each one can be hit by 1000 different entities each
+    // minute. Since we check door keeper's size every hour, we keep the flood gate delta 10 * 1000 = 10000.
+    public static final int DOOR_KEEPER_FLOOD_GATE_DELTA = 10_000;
+
+    public static final double DOOR_KEEPER_FAULSE_POSITIVE_RATE = 0.01;
+
+    public static final Setting<Integer> MAX_ENTITIES_PER_QUERY = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_retry_for_end_run_exception",
+            10000,
+            1,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
 }

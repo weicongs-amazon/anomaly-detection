@@ -63,6 +63,7 @@ public class RolloverTests extends ESTestCase {
     private ClusterName clusterName;
     private ClusterState clusterState;
     private ClusterService clusterService;
+    private long defaultMaxDocs;
 
     @Override
     public void setUp() throws Exception {
@@ -108,6 +109,8 @@ public class RolloverTests extends ESTestCase {
             listener.onResponse(new ClusterStateResponse(clusterName, clusterState, true));
             return null;
         }).when(clusterAdminClient).state(any(), any());
+
+        defaultMaxDocs = AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
     }
 
     private IndexMetadata indexMeta(String name, long creationDate, String... aliases) {
@@ -132,7 +135,7 @@ public class RolloverTests extends ESTestCase {
 
         Map<String, Condition<?>> conditions = request.getConditions();
         assertEquals(1, conditions.size());
-        assertEquals(new MaxDocsCondition(9000000L), conditions.get(MaxDocsCondition.NAME));
+        assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
 
         CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
         assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());
@@ -172,7 +175,7 @@ public class RolloverTests extends ESTestCase {
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
-            assertEquals(new MaxDocsCondition(9000000L), conditions.get(MaxDocsCondition.NAME));
+            assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
 
             CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
             assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());
@@ -211,7 +214,7 @@ public class RolloverTests extends ESTestCase {
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
-            assertEquals(new MaxDocsCondition(9000000L), conditions.get(MaxDocsCondition.NAME));
+            assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
 
             CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
             assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());

@@ -177,6 +177,11 @@ public class TestHelpers {
         return randomAnomalyDetector(ImmutableList.of(randomFeature()), uiMetadata, lastUpdateTime);
     }
 
+    public static AnomalyDetector randomAnomalyDetector(Map<String, Object> uiMetadata, Instant lastUpdateTime, boolean featureEnabled)
+        throws IOException {
+        return randomAnomalyDetector(ImmutableList.of(randomFeature(featureEnabled)), uiMetadata, lastUpdateTime);
+    }
+
     public static AnomalyDetector randomAnomalyDetector(List<Feature> features, Map<String, Object> uiMetadata, Instant lastUpdateTime)
         throws IOException {
         return new AnomalyDetector(
@@ -193,7 +198,8 @@ public class TestHelpers {
             randomIntBetween(1, 2000),
             uiMetadata,
             randomInt(),
-            lastUpdateTime
+            lastUpdateTime,
+            null
         );
     }
 
@@ -212,7 +218,8 @@ public class TestHelpers {
             randomIntBetween(1, 2000),
             null,
             randomInt(),
-            Instant.now()
+            Instant.now(),
+            null
         );
     }
 
@@ -231,7 +238,8 @@ public class TestHelpers {
             randomIntBetween(1, 2000),
             null,
             randomInt(),
-            Instant.now().truncatedTo(ChronoUnit.SECONDS)
+            Instant.now().truncatedTo(ChronoUnit.SECONDS),
+            null
         );
     }
 
@@ -250,7 +258,8 @@ public class TestHelpers {
             randomIntBetween(1, 2000),
             null,
             randomInt(),
-            Instant.now().truncatedTo(ChronoUnit.SECONDS)
+            Instant.now().truncatedTo(ChronoUnit.SECONDS),
+            null
         );
     }
 
@@ -315,6 +324,21 @@ public class TestHelpers {
             throw new RuntimeException();
         }
         return new Feature(randomAlphaOfLength(5), featureName, ESRestTestCase.randomBoolean(), testAggregation);
+    }
+
+    public static Feature randomFeature(boolean enabled) {
+        return randomFeature(randomAlphaOfLength(5), randomAlphaOfLength(5), enabled);
+    }
+
+    public static Feature randomFeature(String featureName, String aggregationName, boolean enabled) {
+        AggregationBuilder testAggregation = null;
+        try {
+            testAggregation = randomAggregation(aggregationName);
+        } catch (IOException e) {
+            logger.error("Fail to generate test aggregation");
+            throw new RuntimeException();
+        }
+        return new Feature(randomAlphaOfLength(5), featureName, enabled, testAggregation);
     }
 
     public static <S, T> void assertFailWith(Class<S> clazz, Callable<T> callable) throws Exception {
