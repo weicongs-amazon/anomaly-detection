@@ -140,6 +140,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                         );
                 }
             }
+
             this.anomalyResultHandler.mayCreateIndexBeforeBulk(currentBulkRequest, detectorId);
             // bulk all accumulated checkpoint requests
             this.checkpointDao.bulk();
