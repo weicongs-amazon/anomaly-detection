@@ -276,7 +276,7 @@ public abstract class AnomalyIndexHandler<T extends ToXContentObject> {
                 currentBulkRequest,
                 ActionListener
                     .<BulkResponse>wrap(
-                        response -> LOG.debug(String.format(SUCCESS_SAVING_MSG, detectorId)),
+                        response -> LOG.info(String.format("Weicongs: AD Results " + SUCCESS_SAVING_MSG, detectorId)),
                         exception -> { LOG.error(String.format(FAIL_TO_SAVE_ERR_MSG, detectorId), exception); }
                     )
             );
