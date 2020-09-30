@@ -197,7 +197,7 @@ public class PriorityCache implements EntityCache {
                             if (exception instanceof IndexNotFoundException) {
                                 modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, state);
                             } else {
-                                LOG.error("Fail to restore models for " + modelId);
+                                LOG.error("Fail to restore models for " + modelId, exception);
                             }
                         })
                 );
