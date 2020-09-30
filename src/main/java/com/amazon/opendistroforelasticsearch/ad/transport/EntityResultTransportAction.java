@@ -140,7 +140,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                         );
 //                }
             }
-
+            LOG.info("Weicongs-Testing: AD results bulk size:{}", currentBulkRequest.requests().size());
             this.anomalyResultHandler.mayCreateIndexBeforeBulk(currentBulkRequest, detectorId);
             // bulk all accumulated checkpoint requests
             this.checkpointDao.bulk();

@@ -115,6 +115,7 @@ testingConventions.enabled = false
 licenseHeaders.enabled = true
 dependencyLicenses.enabled = false
 thirdPartyAudit.enabled = false
+spotlessJava.enabled = false
 
 // See package README.md for details on using these tasks.
 def _numNodes = findProperty('numNodes') as Integer ?: 1
