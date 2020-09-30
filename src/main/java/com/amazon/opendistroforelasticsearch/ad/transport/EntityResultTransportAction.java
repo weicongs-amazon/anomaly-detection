@@ -119,7 +119,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                 ModelState<EntityModel> entityModel = cache.get(modelId, detectorId, datapoint, entityName);
                 ThresholdingResult result = manager.getAnomalyResultForEntity(detectorId, datapoint, entityName, entityModel, modelId);
                 // So many EsRejectedExecutionException if we write no matter what
-                if (result.getRcfScore() > 0) {
+//                if (result.getRcfScore() > 0) {
                     this.anomalyResultHandler
                         .prepareBulk(
                             new AnomalyResult(
@@ -138,7 +138,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                             currentBulkRequest,
                             detectorId
                         );
-                }
+//                }
             }
 
             this.anomalyResultHandler.mayCreateIndexBeforeBulk(currentBulkRequest, detectorId);
