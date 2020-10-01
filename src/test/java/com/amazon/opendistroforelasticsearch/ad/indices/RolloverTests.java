@@ -79,7 +79,7 @@ public class RolloverTests extends ESTestCase {
                     new HashSet<>(
                         Arrays
                             .asList(
-                                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS,
+                                AnomalyDetectorSettings.SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD
                             )
@@ -110,7 +110,7 @@ public class RolloverTests extends ESTestCase {
             return null;
         }).when(clusterAdminClient).state(any(), any());
 
-        defaultMaxDocs = AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
+        defaultMaxDocs = AnomalyDetectorSettings.SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
     }
 
     private IndexMetadata indexMeta(String name, long creationDate, String... aliases) {

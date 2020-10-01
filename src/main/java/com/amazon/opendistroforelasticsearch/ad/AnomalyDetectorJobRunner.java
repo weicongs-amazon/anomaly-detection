@@ -56,8 +56,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultRequest;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultResponse;
 import com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultTransportAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.handler.AnomalyIndexHandler;
 import com.amazon.opendistroforelasticsearch.ad.transport.handler.DetectionStateHandler;
-import com.amazon.opendistroforelasticsearch.ad.transport.handler.MultitiEntityResultHandler;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.jobscheduler.spi.JobExecutionContext;
 import com.amazon.opendistroforelasticsearch.jobscheduler.spi.LockModel;
@@ -78,7 +78,7 @@ public class AnomalyDetectorJobRunner implements ScheduledJobRunner {
     private Client client;
     private ClientUtil clientUtil;
     private ThreadPool threadPool;
-    private MultitiEntityResultHandler anomalyResultHandler;
+    private AnomalyIndexHandler<AnomalyResult> anomalyResultHandler;
     private ConcurrentHashMap<String, Integer> detectorEndRunExceptionCount;
     private DetectionStateHandler detectionStateHandler;
 
@@ -112,7 +112,7 @@ public class AnomalyDetectorJobRunner implements ScheduledJobRunner {
         this.threadPool = threadPool;
     }
 
-    public void setAnomalyResultHandler(MultitiEntityResultHandler anomalyResultHandler) {
+    public void setAnomalyResultHandler(AnomalyIndexHandler<AnomalyResult> anomalyResultHandler) {
         this.anomalyResultHandler = anomalyResultHandler;
     }
 

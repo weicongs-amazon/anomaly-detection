@@ -282,7 +282,7 @@ public class ModelManager {
         return rcfCheckpoint
             .map(checkpoint -> AccessController.doPrivileged((PrivilegedAction<RandomCutForest>) () -> rcfSerde.fromJson(checkpoint)))
             .filter(rcf -> memoryTracker.isHostingAllowed(detectorId, rcf))
-            .map(rcf -> ModelState.createClassicModelState(rcf, modelId, detectorId, ModelType.RCF.getName(), clock));
+            .map(rcf -> ModelState.createSingleEntityModelState(rcf, modelId, detectorId, ModelType.RCF.getName(), clock));
     }
 
     private void processRcfCheckpoint(
@@ -372,7 +372,7 @@ public class ModelManager {
                 checkpoint -> AccessController
                     .doPrivileged((PrivilegedAction<ThresholdingModel>) () -> gson.fromJson(checkpoint, thresholdingModelClass))
             )
-            .map(threshold -> ModelState.createClassicModelState(threshold, modelId, detectorId, ModelType.THRESHOLD.getName(), clock));
+            .map(threshold -> ModelState.createSingleEntityModelState(threshold, modelId, detectorId, ModelType.THRESHOLD.getName(), clock));
         if (model.isPresent()) {
             thresholds.put(modelId, model.get());
             getThresholdingResult(model.get(), score, listener);
@@ -983,7 +983,7 @@ public class ModelManager {
      * @return The model Id
      */
     public String getEntityModelId(String detectorId, String entityValue) {
-        return detectorId + "-" + entityValue;
+        return detectorId + "-entity-" + entityValue;
     }
 
     /**
@@ -1006,8 +1006,7 @@ public class ModelManager {
             modelState.setLastCheckpointTime(modelToTime.getValue());
         }
 
-        EntityModel model = modelState.getModel();
-        assert (model != null);
+        assert (modelState.getModel() != null);
         maybeTrainBeforeScore(modelState, entityName);
     }
 
@@ -1025,11 +1024,6 @@ public class ModelManager {
         String detectorId = modelState.getDetectorId();
         ThresholdingResult result = null;
         if (model.getRcf() == null || model.getThreshold() == null) {
-            // TODO: only load models to cache if they finish training. It is not easy to do
-            // now as we bundle the decision of admitting a model to cache with training result.
-            // This blurred the boundary between two different components and tightly coupled
-            // them together. Not a good practice.
-            // we also have to deal with the samples from training and from AD job run together.
             entityColdStarter.trainModel(samples, modelId, entityName, detectorId, modelState);
         }
 

@@ -22,6 +22,12 @@ public class CommonName {
     // index name for anomaly checkpoint of each model. One model one document.
     public static final String CHECKPOINT_INDEX_NAME = ".opendistro-anomaly-checkpoints";
 
+    // The alias of the index in which to write single-entity AD result history
+    public static final String ANOMALY_RESULT_INDEX_ALIAS = ".opendistro-anomaly-results";
+
+    // The alias of the index in which to write multi-entity AD result history
+    public static final String MULTI_ENTITY_ANOMALY_RESULT_INDEX_ALIAS = ".opendistro-anomaly-multi-entity-results";
+
     // ======================================
     // Format name
     // ======================================

@@ -15,6 +15,10 @@
 
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.COOLDOWN_MINUTES;
+
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map.Entry;
@@ -23,11 +27,11 @@ import java.util.Optional;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.HandledTransportAction;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.transport.TransportService;
 
@@ -58,6 +62,8 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
     private CheckpointDao checkpointDao;
     private EntityCache cache;
     private final NodeStateManager stateManager;
+    private final int coolDownMinutes;
+    private final Clock clock;
 
     @Inject
     public EntityResultTransportAction(
@@ -68,7 +74,9 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
         MultitiEntityResultHandler anomalyResultHandler,
         CheckpointDao checkpointDao,
         CacheProvider entityCache,
-        NodeStateManager stateManager
+        NodeStateManager stateManager,
+        Settings settings,
+        Clock clock
     ) {
         super(EntityResultAction.NAME, transportService, actionFilters, EntityResultRequest::new);
         this.manager = manager;
@@ -77,6 +85,8 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
         this.checkpointDao = checkpointDao;
         this.cache = entityCache;
         this.stateManager = stateManager;
+        this.coolDownMinutes = (int)(COOLDOWN_MINUTES.get(settings).getMinutes());
+        this.clock = clock;
     }
 
     @Override
@@ -111,17 +121,24 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
             // we only support 1 categorical field now
             String categoricalField = detector.getCategoryField().get(0);
 
-            BulkRequest currentBulkRequest = new BulkRequest();
+            AdaptiveBulkRequest currentBulkRequest = new AdaptiveBulkRequest();
+            // index pressure is high.  Only save anomalies
+            boolean onlySaveAnomalies = stateManager.getLastIndexThrottledTime()
+                .plus(Duration.ofMinutes(coolDownMinutes))
+                .isBefore(clock.instant());
+
             for (Entry<String, double[]> entity : request.getEntities().entrySet()) {
                 String entityName = entity.getKey();
                 double[] datapoint = entity.getValue();
                 String modelId = manager.getEntityModelId(detectorId, entityName);
-                ModelState<EntityModel> entityModel = cache.get(modelId, detectorId, datapoint, entityName);
+                ModelState<EntityModel> entityModel = cache.get(modelId, detector, datapoint, entityName);
                 ThresholdingResult result = manager.getAnomalyResultForEntity(detectorId, datapoint, entityName, entityModel, modelId);
+                // result.getRcfScore() = 0 means the model is not initialized
+                // result.getGrade() = 0 means it is not an anomaly
                 // So many EsRejectedExecutionException if we write no matter what
-                if (result.getRcfScore() > 0) {
+                if ((onlySaveAnomalies && result.getGrade() > 0) || result.getRcfScore() > 0) {
                     this.anomalyResultHandler
-                        .prepareBulk(
+                        .write(
                             new AnomalyResult(
                                 detectorId,
                                 result.getRcfScore(),
@@ -135,14 +152,13 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                                 null,
                                 Arrays.asList(new Entity(categoricalField, entityName))
                             ),
-                            currentBulkRequest,
-                            detectorId
+                            currentBulkRequest
                         );
                 }
             }
-            this.anomalyResultHandler.mayCreateIndexBeforeBulk(currentBulkRequest, detectorId);
+            this.anomalyResultHandler.flush(currentBulkRequest, detectorId);
             // bulk all accumulated checkpoint requests
-            this.checkpointDao.bulk();
+            this.checkpointDao.flush();
             listener.onResponse(new AcknowledgedResponse(true));
         }, exception -> {
             LOG.error("fail to get entity's anomaly grade", exception);

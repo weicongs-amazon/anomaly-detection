@@ -19,6 +19,9 @@ import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpect
 
 import java.io.IOException;
 
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -31,7 +34,7 @@ import com.google.common.base.Objects;
  * @author kaituo
  *
  */
-public class Entity implements ToXContentObject {
+public class Entity implements ToXContentObject, Writeable {
     public static final String ENTITY_NAME_FIELD = "name";
     public static final String ENTITY_VALUE_FIELD = "value";
 
@@ -41,6 +44,11 @@ public class Entity implements ToXContentObject {
     public Entity(String name, String value) {
         this.name = name;
         this.value = value;
+    }
+
+    public Entity(StreamInput input) throws IOException {
+        this.name = input.readString();
+        this.value = input.readString();
     }
 
     @Override
@@ -97,5 +105,11 @@ public class Entity implements ToXContentObject {
     @Generated
     public String getValue() {
         return value;
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeString(name);
+        out.writeString(value);
     }
 }

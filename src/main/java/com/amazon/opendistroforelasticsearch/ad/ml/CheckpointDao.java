@@ -177,7 +177,7 @@ public class CheckpointDao {
     /**
      * Bulk writing model states prepared previously
      */
-    public void bulk() {
+    public void flush() {
         try {
             // in case that other threads are doing bulk as well.
             if (!lock.tryLock()) {
@@ -215,7 +215,7 @@ public class CheckpointDao {
      * @param modelState Model state
      * @param modelId Model Id
      */
-    public void prepareBulk(ModelState<EntityModel> modelState, String modelId) {
+    public void write(ModelState<EntityModel> modelState, String modelId) {
         // we don't save checkpoints within checkpointInterval again
         if (modelState.getLastCheckpointTime().plus(checkpointInterval).isAfter(clock.instant())) {
             return;

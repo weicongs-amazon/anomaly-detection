@@ -15,7 +15,8 @@
 
 package com.amazon.opendistroforelasticsearch.ad.indices;
 
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MULTI_ENTITY_AD_RESULT_HISTORY_MAX_DOCS;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_DETECTION_STATE_INDEX_MAPPING_FILE;
@@ -54,6 +55,7 @@ import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.threadpool.Scheduler;
 import org.elasticsearch.threadpool.ThreadPool;
 
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
@@ -67,14 +69,17 @@ import com.google.common.io.Resources;
  */
 public class AnomalyDetectionIndices implements LocalNodeMasterListener {
 
-    // The alias of the index in which to write AD result history
-    public static final String AD_RESULT_HISTORY_WRITE_INDEX_ALIAS = AnomalyResult.ANOMALY_RESULT_INDEX;
-
     // The index name pattern to query all the AD result history indices
     public static final String AD_RESULT_HISTORY_INDEX_PATTERN = "<.opendistro-anomaly-results-history-{now/d}-1>";
 
-    // The index name pattern to query all AD result, history and current AD result
+    // The index name pattern to query all single-entity AD result, history and current AD result
     public static final String ALL_AD_RESULTS_INDEX_PATTERN = ".opendistro-anomaly-results*";
+
+    // The index name pattern to query all multi-entity AD result history indices
+    public static final String MULTI_ENTITY_AD_RESULT_HISTORY_INDEX_PATTERN = "<.opendistro-anomaly-multi-entity-results-history-{now/d}-1>";
+
+    // The index name pattern to query all multi-entity AD result, history and current AD result
+    public static final String ALL_MULTI_ENTITY_AD_RESULTS_INDEX_PATTERN = ".opendistro-anomaly-multi-entity-results*";
 
     // Elastic mapping type
     static final String MAPPING_TYPE = "_doc";
@@ -84,7 +89,8 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
     private final ThreadPool threadPool;
 
     private volatile TimeValue historyRolloverPeriod;
-    private volatile Long historyMaxDocs;
+    private volatile Long singleEntityHistoryMaxDocs;
+    private volatile Long multiEntityHistoryMaxDocs;
     private volatile TimeValue historyRetentionPeriod;
 
     private Scheduler.Cancellable scheduledRollover = null;
@@ -105,9 +111,11 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         this.threadPool = threadPool;
         this.clusterService.addLocalNodeMasterListener(this);
         this.historyRolloverPeriod = AD_RESULT_HISTORY_ROLLOVER_PERIOD.get(settings);
-        this.historyMaxDocs = AD_RESULT_HISTORY_MAX_DOCS.get(settings);
+        this.singleEntityHistoryMaxDocs = SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS.get(settings);
+        this.multiEntityHistoryMaxDocs = MULTI_ENTITY_AD_RESULT_HISTORY_MAX_DOCS.get(settings);
         this.historyRetentionPeriod = AD_RESULT_HISTORY_RETENTION_PERIOD.get(settings);
-        this.clusterService.getClusterSettings().addSettingsUpdateConsumer(AD_RESULT_HISTORY_MAX_DOCS, it -> historyMaxDocs = it);
+        this.clusterService.getClusterSettings().addSettingsUpdateConsumer(SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS, it -> singleEntityHistoryMaxDocs = it);
+        this.clusterService.getClusterSettings().addSettingsUpdateConsumer(MULTI_ENTITY_AD_RESULT_HISTORY_MAX_DOCS, it -> multiEntityHistoryMaxDocs = it);
         this.clusterService.getClusterSettings().addSettingsUpdateConsumer(AD_RESULT_HISTORY_ROLLOVER_PERIOD, it -> {
             historyRolloverPeriod = it;
             rescheduleRollover();
@@ -185,7 +193,16 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
      * @return true if anomaly detector index exists
      */
     public boolean doesAnomalyResultIndexExist() {
-        return clusterService.state().metadata().hasAlias(AnomalyResult.ANOMALY_RESULT_INDEX);
+        return clusterService.state().metadata().hasAlias(CommonName.ANOMALY_RESULT_INDEX_ALIAS);
+    }
+
+    /**
+     * Multi-entity anomaly result index exist or not.
+     *
+     * @return true if anomaly detector index exists
+     */
+    public boolean doesMultiEntityAnomalyResultIndexExist() {
+        return clusterService.state().metadata().hasAlias(CommonName.MULTI_ENTITY_ANOMALY_RESULT_INDEX_ALIAS);
     }
 
     /**
@@ -243,7 +260,35 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         String mapping = getAnomalyResultMappings();
         CreateIndexRequest request = new CreateIndexRequest(AD_RESULT_HISTORY_INDEX_PATTERN)
             .mapping(MAPPING_TYPE, mapping, XContentType.JSON)
-            .alias(new Alias(AD_RESULT_HISTORY_WRITE_INDEX_ALIAS));
+            .alias(new Alias(CommonName.ANOMALY_RESULT_INDEX_ALIAS));
+        adminClient.indices().create(request, actionListener);
+    }
+
+    /**
+     * Create anomaly detector index without checking exist or not.
+     *
+     * @param actionListener action called after create index
+     * @throws IOException IOException from {@link AnomalyDetectionIndices#getAnomalyDetectorMappings}
+     */
+    public void initMultiEntityAnomalyResultIndexDirectly(ActionListener<CreateIndexResponse> actionListener) throws IOException {
+        String mapping = getAnomalyResultMappings();
+        CreateIndexRequest request = new CreateIndexRequest(MULTI_ENTITY_AD_RESULT_HISTORY_INDEX_PATTERN).mapping(
+            MAPPING_TYPE,
+            mapping,
+            XContentType.JSON
+        ).alias(new Alias(CommonName.MULTI_ENTITY_ANOMALY_RESULT_INDEX_ALIAS));
+        request.settings(
+            Settings.builder()
+                // 5 shards instead of the default 1 to reduce indexing pressure
+                // as only the primary shards can accept indexing requests.
+                // We don't use all the number of data nodes as the number of primary
+                // shards as allocation rules such as allocation filtering and shard
+                // allocation awareness, and total shards per node are complicated
+                // not easy to do it right.
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 5)
+                // 1 replica for better search performance and fail-over
+                .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
+        );
         adminClient.indices().create(request, actionListener);
     }
 
@@ -277,6 +322,7 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         try {
             // try to rollover immediately as we might be restarting the cluster
             rolloverAndDeleteHistoryIndex();
+
             // schedule the next rollover for approx MAX_AGE later
             scheduledRollover = threadPool
                 .scheduleWithFixedDelay(() -> rolloverAndDeleteHistoryIndex(), historyRolloverPeriod, executorName());
@@ -303,18 +349,44 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
             if (scheduledRollover != null) {
                 scheduledRollover.cancel();
             }
-            scheduledRollover = threadPool
-                .scheduleWithFixedDelay(() -> rolloverAndDeleteHistoryIndex(), historyRolloverPeriod, executorName());
+            scheduledRollover = threadPool.scheduleWithFixedDelay(
+                () -> rolloverAndDeleteHistoryIndex(
+                    CommonName.ANOMALY_RESULT_INDEX_ALIAS,
+                    AD_RESULT_HISTORY_INDEX_PATTERN,
+                    singleEntityHistoryMaxDocs
+                ),
+                historyRolloverPeriod,
+                executorName()
+            );
+
+            scheduledRollover = threadPool.scheduleWithFixedDelay(
+                () -> rolloverAndDeleteHistoryIndex(
+                    CommonName.MULTI_ENTITY_ANOMALY_RESULT_INDEX_ALIAS,
+                    MULTI_ENTITY_AD_RESULT_HISTORY_INDEX_PATTERN,
+                    multiEntityHistoryMaxDocs
+                ),
+                historyRolloverPeriod,
+                executorName()
+            );
         }
     }
 
     void rolloverAndDeleteHistoryIndex() {
+        rolloverAndDeleteHistoryIndex(CommonName.ANOMALY_RESULT_INDEX_ALIAS, AD_RESULT_HISTORY_INDEX_PATTERN, singleEntityHistoryMaxDocs);
+        rolloverAndDeleteHistoryIndex(
+            CommonName.MULTI_ENTITY_ANOMALY_RESULT_INDEX_ALIAS,
+            MULTI_ENTITY_AD_RESULT_HISTORY_INDEX_PATTERN,
+            multiEntityHistoryMaxDocs
+        );
+    }
+
+    void rolloverAndDeleteHistoryIndex(String alias, String indexPattern, Long historyMaxDocs) {
         if (!doesAnomalyResultIndexExist()) {
             return;
         }
 
         // We have to pass null for newIndexName in order to get Elastic to increment the index count.
-        RolloverRequest request = new RolloverRequest(AD_RESULT_HISTORY_WRITE_INDEX_ALIAS, null);
+        RolloverRequest request = new RolloverRequest(alias, null);
         String adResultMapping = null;
         try {
             adResultMapping = getAnomalyResultMappings();
@@ -322,24 +394,24 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
             logger.error("Fail to roll over AD result index, as can't get AD result index mapping");
             return;
         }
-        request.getCreateIndexRequest().index(AD_RESULT_HISTORY_INDEX_PATTERN).mapping(MAPPING_TYPE, adResultMapping, XContentType.JSON);
+        request.getCreateIndexRequest().index(indexPattern).mapping(MAPPING_TYPE, adResultMapping, XContentType.JSON);
         request.addMaxIndexDocsCondition(historyMaxDocs);
         adminClient.indices().rolloverIndex(request, ActionListener.wrap(response -> {
             if (!response.isRolledOver()) {
-                logger.warn("{} not rolled over. Conditions were: {}", AD_RESULT_HISTORY_WRITE_INDEX_ALIAS, response.getConditionStatus());
+                logger.warn("{} not rolled over. Conditions were: {}", alias, response.getConditionStatus());
             } else {
-                logger.info("{} rolled over. Conditions were: {}", AD_RESULT_HISTORY_WRITE_INDEX_ALIAS, response.getConditionStatus());
-                deleteOldHistoryIndices();
+                logger.info("{} rolled over. Conditions were: {}", alias, response.getConditionStatus());
+                deleteOldHistoryIndices(indexPattern);
             }
         }, exception -> { logger.error("Fail to roll over result index", exception); }));
     }
 
-    void deleteOldHistoryIndices() {
+    void deleteOldHistoryIndices(String indexPattern) {
         Set<String> candidates = new HashSet<String>();
 
         ClusterStateRequest clusterStateRequest = new ClusterStateRequest()
             .clear()
-            .indices(AnomalyDetectionIndices.ALL_AD_RESULTS_INDEX_PATTERN)
+            .indices(indexPattern)
             .metadata(true)
             .local(true)
             .indicesOptions(IndicesOptions.strictExpand());

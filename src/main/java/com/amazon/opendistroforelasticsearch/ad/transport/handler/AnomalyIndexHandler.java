@@ -29,9 +29,6 @@ import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
 import org.elasticsearch.action.bulk.BackoffPolicy;
-import org.elasticsearch.action.bulk.BulkAction;
-import org.elasticsearch.action.bulk.BulkRequest;
-import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.client.Client;
@@ -50,26 +47,25 @@ import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.IndexUtils;
 import com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils;
 
-public abstract class AnomalyIndexHandler<T extends ToXContentObject> {
+public class AnomalyIndexHandler<T extends ToXContentObject> {
     private static final Logger LOG = LogManager.getLogger(AnomalyIndexHandler.class);
-
-    static final String CANNOT_SAVE_ERR_MSG = "Cannot save %s due to write block.";
     static final String FAIL_TO_SAVE_ERR_MSG = "Fail to save %s: ";
-    static final String RETRY_SAVING_ERR_MSG = "Retry in saving %s: ";
     static final String SUCCESS_SAVING_MSG = "Succeed in saving %s";
+    static final String CANNOT_SAVE_ERR_MSG = "Cannot save %s due to write block.";
+    static final String RETRY_SAVING_ERR_MSG = "Retry in saving %s: ";
 
     protected final Client client;
 
-    private final ThreadPool threadPool;
-    private final BackoffPolicy savingBackoffPolicy;
+    protected final ThreadPool threadPool;
+    protected final BackoffPolicy savingBackoffPolicy;
     protected final String indexName;
-    private final Consumer<ActionListener<CreateIndexResponse>> createIndex;
-    private final BooleanSupplier indexExists;
+    protected final Consumer<ActionListener<CreateIndexResponse>> createIndex;
+    protected final BooleanSupplier indexExists;
     // whether save to a specific doc id or not. False by default.
     protected boolean fixedDoc;
     protected final ClientUtil clientUtil;
-    private final IndexUtils indexUtils;
-    private final ClusterService clusterService;
+    protected final IndexUtils indexUtils;
+    protected final ClusterService clusterService;
 
     /**
      * Abstract class for index operation.
@@ -208,77 +204,6 @@ public abstract class AnomalyIndexHandler<T extends ToXContentObject> {
                         threadPool.schedule(() -> saveIteration(newReuqest, detectorId, backoff), nextDelay, ThreadPool.Names.SAME);
                     }
                 })
-            );
-    }
-
-    public void prepareBulk(T toSave, BulkRequest currentBulkRequest, String detectorId) {
-        try (XContentBuilder builder = jsonBuilder()) {
-            IndexRequest indexRequest = new IndexRequest(indexName).source(toSave.toXContent(builder, RestHandlerUtils.XCONTENT_WITH_TYPE));
-            currentBulkRequest.add(indexRequest);
-        } catch (Exception e) {
-            LOG.error(String.format("Failed to prepare bulk %s", indexName), e);
-            throw new AnomalyDetectionException(detectorId, String.format("Cannot save %s", indexName));
-        }
-    }
-
-    public void mayCreateIndexBeforeBulk(BulkRequest currentBulkRequest, String detectorId) {
-        if (indexUtils.checkIndicesBlocked(clusterService.state(), ClusterBlockLevel.WRITE, this.indexName)) {
-            LOG.warn(String.format(Locale.ROOT, CANNOT_SAVE_ERR_MSG, detectorId));
-            return;
-        }
-
-        try {
-            if (!indexExists.getAsBoolean()) {
-                createIndex
-                    .accept(
-                        ActionListener
-                            .wrap(initResponse -> onCreateIndexResponse(initResponse, currentBulkRequest, detectorId), exception -> {
-                                if (ExceptionsHelper.unwrapCause(exception) instanceof ResourceAlreadyExistsException) {
-                                    // It is possible the index has been created while we sending the create request
-                                    bulk(currentBulkRequest, detectorId);
-                                } else {
-                                    throw new AnomalyDetectionException(
-                                        detectorId,
-                                        String.format("Unexpected error creating index %s", indexName),
-                                        exception
-                                    );
-                                }
-                            })
-                    );
-            } else {
-                bulk(currentBulkRequest, detectorId);
-            }
-        } catch (Exception e) {
-            throw new AnomalyDetectionException(
-                detectorId,
-                String.format(Locale.ROOT, "Error in bulking %s for detector %s", indexName, detectorId),
-                e
-            );
-        }
-    }
-
-    private void onCreateIndexResponse(CreateIndexResponse response, BulkRequest bulkRequest, String detectorId) {
-        if (response.isAcknowledged()) {
-            bulk(bulkRequest, detectorId);
-        } else {
-            throw new AnomalyDetectionException(detectorId, "Creating %s with mappings call not acknowledged.");
-        }
-    }
-
-    private void bulk(BulkRequest currentBulkRequest, String detectorId) {
-        // TODO: add retry logic
-        if (currentBulkRequest.numberOfActions() <= 0) {
-            return;
-        }
-        client
-            .execute(
-                BulkAction.INSTANCE,
-                currentBulkRequest,
-                ActionListener
-                    .<BulkResponse>wrap(
-                        response -> LOG.debug(String.format(SUCCESS_SAVING_MSG, detectorId)),
-                        exception -> { LOG.error(String.format(FAIL_TO_SAVE_ERR_MSG, detectorId), exception); }
-                    )
             );
     }
 }

@@ -15,15 +15,17 @@
 
 package com.amazon.opendistroforelasticsearch.ad.caching;
 
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.COOLDOWN_MINUTES;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -31,11 +33,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.index.IndexNotFoundException;
-import org.elasticsearch.monitor.jvm.JvmService;
 
 import com.amazon.opendistroforelasticsearch.ad.MemoryTracker;
-import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
 import com.amazon.opendistroforelasticsearch.ad.ml.CheckpointDao;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
@@ -43,8 +45,10 @@ import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager.ModelType;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelState;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.common.util.concurrent.RateLimiter;
 
 public class PriorityCache implements EntityCache {
     private final Logger LOG = LogManager.getLogger(PriorityCache.class);
@@ -53,7 +57,6 @@ public class PriorityCache implements EntityCache {
     private final Map<String, CacheBuffer> activeEnities;
     private final CheckpointDao checkpointDao;
     private final int dedicatedCacheSize;
-    private final NodeStateManager stateManager;
     // LRU Cache
     private Cache<String, ModelState<EntityModel>> inActiveEntities;
     private final MemoryTracker memoryTracker;
@@ -61,33 +64,29 @@ public class PriorityCache implements EntityCache {
     private final ReentrantLock lock;
     private final int numberOfTrees;
     private final Clock clock;
-    private final DoorKeeper doorKeeper;
-    private long heapLimit;
-    private int maxInactiveStates;
     private final Duration modelTtl;
     private final int numMinSamples;
+    private Map<String, DoorKeeper> doorKeepers;
+    private final RateLimiter restoreRateLimiter;
+    private Instant lastThrottledRestoreTime;
+    private int coolDownMinutes;
 
     public PriorityCache(
         CheckpointDao checkpointDao,
         int dedicatedCacheSize,
-        NodeStateManager stateManager,
         Duration inactiveEntityTtl,
-        float maxInactiveEntityStatesPercent,
-        int maxInactiveEntityStateBytes,
-        JvmService jvmService,
-        double modelMaxSizePercentage,
+        int maxInactiveStates,
         MemoryTracker memoryTracker,
         ModelManager modelManager,
         int numberOfTrees,
         Clock clock,
-        DoorKeeper doorKeeper,
         ClusterService clusterService,
         Duration modelTtl,
-        int numMinSamples
+        int numMinSamples,
+        Settings settings
     ) {
         this.checkpointDao = checkpointDao;
         this.dedicatedCacheSize = dedicatedCacheSize;
-        this.stateManager = stateManager;
 
         this.activeEnities = new ConcurrentHashMap<>();
         this.memoryTracker = memoryTracker;
@@ -95,50 +94,45 @@ public class PriorityCache implements EntityCache {
         this.lock = new ReentrantLock();
         this.numberOfTrees = numberOfTrees;
         this.clock = clock;
-        this.doorKeeper = doorKeeper;
         this.modelTtl = modelTtl;
         this.numMinSamples = numMinSamples;
+        this.doorKeepers = new ConcurrentHashMap<>();
+        // 1 restore from checkpoint per second allowed.
+        this.restoreRateLimiter = RateLimiter.create(1);
 
-        calculateInactiveCacheLimit(
-            jvmService,
-            modelMaxSizePercentage,
-            maxInactiveEntityStatesPercent,
-            maxInactiveEntityStateBytes,
-            inactiveEntityTtl
-        );
+        this.inActiveEntities = CacheBuilder
+            .newBuilder()
+            .expireAfterAccess(inactiveEntityTtl.toHours(), TimeUnit.HOURS)
+            .maximumSize(maxInactiveStates)
+            .concurrencyLevel(1)
+            .build();
 
-        clusterService
-            .getClusterSettings()
-            .addSettingsUpdateConsumer(
-                MODEL_MAX_SIZE_PERCENTAGE,
-                it -> {
-                    calculateInactiveCacheLimit(
-                        jvmService,
-                        it,
-                        maxInactiveEntityStatesPercent,
-                        maxInactiveEntityStateBytes,
-                        inactiveEntityTtl
-                    );
-                }
-            );
+        this.lastThrottledRestoreTime = Instant.MIN;
+        this.coolDownMinutes = (int)(COOLDOWN_MINUTES.get(settings).getMinutes());
     }
 
     @Override
-    public ModelState<EntityModel> get(String modelId, String detectorId, double[] datapoint, String entityName) {
-        // first hit
-        if (!doorKeeper.mightContain(modelId)) {
-            doorKeeper.put(modelId);
-            return null;
-        }
-        CacheBuffer buffer = computeBufferIfAbsent(detectorId);
+    public ModelState<EntityModel> get(String modelId, AnomalyDetector detector, double[] datapoint, String entityName) {
+        String detectorId = detector.getDetectorId();
+        CacheBuffer buffer = computeBufferIfAbsent(detector, detectorId);
         ModelState<EntityModel> modelState = buffer.get(modelId);
         if (modelState == null) {
-            Optional<AnomalyDetector> detectorOptional = stateManager.getAnomalyDetectorIfPresent(detectorId);
-            // we should have detector config available; otherwise, we won't come to this code path
-            if (!detectorOptional.isPresent()) {
-                throw new EndRunException(detectorId, "AnomalyDetector is not available.", true);
+            DoorKeeper doorKeeper = doorKeepers.computeIfAbsent(detectorId, id -> {
+                // reset every 60 intervals
+                return new DoorKeeper(
+                    AnomalyDetectorSettings.DOOR_KEEPER_MAX_INSERTION,
+                    AnomalyDetectorSettings.DOOR_KEEPER_FAULSE_POSITIVE_RATE,
+                    detector.getDetectionIntervalDuration().multipliedBy(60),
+                    clock
+                );
+            });
+
+            // first hit, ignore
+            if (doorKeeper != null && doorKeeper.mightContain(modelId) == false) {
+                doorKeeper.put(modelId);
+                return null;
             }
-            AnomalyDetector detector = detectorOptional.get();
+
             // clean up memory if necessary
             clearUpMemoryIfNecessary();
 
@@ -161,34 +155,45 @@ public class PriorityCache implements EntityCache {
 
             final ModelState<EntityModel> stateToPromote = state;
 
-            // add samples
-            Queue<double[]> samples = stateToPromote.getModel().getSamples();
-            samples.add(datapoint);
-            // only keep the recent numMinSamples
-            if (samples.size() > this.numMinSamples) {
-                samples.remove();
-            }
-
             // There can be race conditions when the memory is close to full. So we can accept more models we want actually
             // host. Extra models will be cleaned up in the next run.
             if (buffer.dedicatedCacheAvailable() || memoryTracker.isHostingAllowed(detectorId, detector, numberOfTrees)) {
+                addSample(stateToPromote, datapoint);
                 buffer.put(modelId, stateToPromote);
                 maybeRestoreOrTrainModel(modelId, entityName, state);
             } else if (buffer.canReplace(priority)) {
                 // TODO: record ejected entity to result index to explain "why
                 // my entities do not emit results"
+                addSample(stateToPromote, datapoint);
                 buffer.replace(modelId, stateToPromote);
                 maybeRestoreOrTrainModel(modelId, entityName, state);
             } else {
+                // only keep weights in inactive cache to keep it small.
+                // It can be dangerous to exceed a few dozen kilobytes, especially
+                // in small heap machine like t2.
                 inActiveEntities.put(modelId, stateToPromote);
             }
         }
         return modelState;
     }
 
+    private void addSample(ModelState<EntityModel> stateToPromote, double[] datapoint) {
+        // add samples
+        Queue<double[]> samples = stateToPromote.getModel().getSamples();
+        samples.add(datapoint);
+        // only keep the recent numMinSamples
+        if (samples.size() > this.numMinSamples) {
+            samples.remove();
+        }
+    }
+
     private void maybeRestoreOrTrainModel(String modelId, String entityName, ModelState<EntityModel> state) {
         EntityModel entityModel = state.getModel();
-        if (entityModel.getRcf() == null || entityModel.getThreshold() == null) {
+        // rate limit in case of EsRejectedExecutionException from get threadpool whose queue capacity is 1k
+        if (entityModel != null
+            && (entityModel.getRcf() == null || entityModel.getThreshold() == null)
+            && lastThrottledRestoreTime.plus(Duration.ofMinutes(coolDownMinutes)).isBefore(clock.instant())
+            && restoreRateLimiter.tryAcquire()) {
             checkpointDao
                 .restoreModelCheckpoint(
                     modelId,
@@ -196,22 +201,20 @@ public class PriorityCache implements EntityCache {
                         .wrap(checkpoint -> modelManager.processEntityCheckpoint(checkpoint, modelId, entityName, state), exception -> {
                             if (exception instanceof IndexNotFoundException) {
                                 modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, state);
-                            } else {
-                                LOG.error("Fail to restore models for " + modelId);
+                            }  if (exception instanceof EsRejectedExecutionException || exception instanceof RejectedExecutionException) {
+                                LOG.error("too many requests");
+                                lastThrottledRestoreTime = Instant.now();
+                            }
+                            else {
+                                LOG.error("Fail to restore models for " + modelId, exception);
                             }
                         })
                 );
         }
     }
 
-    private CacheBuffer computeBufferIfAbsent(String detectorId) {
+    private CacheBuffer computeBufferIfAbsent(AnomalyDetector detector, String detectorId) {
         return activeEnities.computeIfAbsent(detectorId, k -> {
-            Optional<AnomalyDetector> detectorOptional = stateManager.getAnomalyDetectorIfPresent(detectorId);
-            // we should have detector config available; otherwise, we won't come to this code path
-            if (!detectorOptional.isPresent()) {
-                throw new EndRunException(detectorId, "AnomalyDetector is not available.", true);
-            }
-            AnomalyDetector detector = detectorOptional.get();
             long requiredBytes = dedicatedCacheSize * memoryTracker.estimateModelSize(detector, numberOfTrees);
             if (memoryTracker.isHostingAllowed(detectorId, requiredBytes)) {
                 memoryTracker.consumeMemory(requiredBytes, true);
@@ -264,30 +267,14 @@ public class PriorityCache implements EntityCache {
         }
     }
 
-    private void calculateInactiveCacheLimit(
-        JvmService jvmService,
-        double modelMaxSizePercentage,
-        float maxInactiveEntityStatesPercent,
-        int maxInactiveEntityStateBytes,
-        Duration inactiveEntityTtl
-    ) {
-        this.heapLimit = (long) (jvmService.info().getMem().getHeapMax().getBytes() * modelMaxSizePercentage);
-        long inactiveCacheSize = (long) (this.heapLimit * maxInactiveEntityStatesPercent);
-        this.maxInactiveStates = (int) (inactiveCacheSize / maxInactiveEntityStateBytes);
-        // reset inactive cache
-        this.inActiveEntities = CacheBuilder
-            .newBuilder()
-            .expireAfterAccess(inactiveEntityTtl.toHours(), TimeUnit.HOURS)
-            .maximumSize(maxInactiveStates)
-            .concurrencyLevel(1)
-            .build();
-        memoryTracker.consumeMemory(inactiveCacheSize, true);
-    }
-
     @Override
     public void maintenance() {
         activeEnities.entrySet().stream().forEach(cacheBufferEntry -> {
             cacheBufferEntry.getValue().maintenance();
+            ;
+        });
+        doorKeepers.entrySet().stream().forEach(doorKeeperEntry -> {
+            doorKeeperEntry.getValue().maintenance();
             ;
         });
     }
@@ -297,8 +284,10 @@ public class PriorityCache implements EntityCache {
      *
      * @param detectorId id the of the detector for which models are to be permanently deleted
      */
+    @Override
     public void clear(String detectorId) {
         activeEnities.remove(detectorId);
         checkpointDao.deleteModelCheckpointByDetectorId(detectorId);
+        doorKeepers.remove(detectorId);
     }
 }

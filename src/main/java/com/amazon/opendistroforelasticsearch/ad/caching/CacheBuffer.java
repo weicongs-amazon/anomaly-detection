@@ -20,10 +20,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
@@ -96,10 +96,10 @@ public class CacheBuffer {
 
     private final int minimumCapacity;
     // key -> Priority node
-    private final Map<String, PriorityNode> key2Priority;
-    private final TreeSet<PriorityNode> priorityMinHeap;
+    private final ConcurrentHashMap<String, PriorityNode> key2Priority;
+    private final ConcurrentSkipListSet<PriorityNode> priorityMinHeap;
     // key -> value
-    private final Map<String, ModelState<EntityModel>> items;
+    private final ConcurrentHashMap<String, ModelState<EntityModel>> items;
     // when detector is created.  Can be reset.  Unit: seconds
     private long landmarkSecs;
     // length of seconds in one interval.  Used to compute elapsed periods
@@ -114,6 +114,7 @@ public class CacheBuffer {
     private final Clock clock;
     private final CheckpointDao checkpointDao;
     private final Duration modelTtl;
+    private final ReentrantLock evictionLock;
 
     public CacheBuffer(
         int minimumCapacity,
@@ -125,15 +126,15 @@ public class CacheBuffer {
         Duration modelTtl
     ) {
         this.minimumCapacity = minimumCapacity;
-        this.key2Priority = new HashMap<>();
-        this.priorityMinHeap = new TreeSet<>(new PriorityNodeComparator());
-        this.items = new HashMap<>();
+        this.key2Priority = new ConcurrentHashMap<>();
+        this.priorityMinHeap = new ConcurrentSkipListSet<>(new PriorityNodeComparator());
+        this.items = new ConcurrentHashMap<>();
         this.landmarkSecs = Instant.now().getEpochSecond();
         this.intervalSecs = intervalSecs;
         this.removalListener = new RemovalListener<String, ModelState<EntityModel>>() {
             @Override
             public void onRemoval(RemovalNotification<String, ModelState<EntityModel>> n) {
-                checkpointDao.prepareBulk(n.getValue(), n.getKey());
+                checkpointDao.write(n.getValue(), n.getKey());
             }
         };
         this.memoryConsumptionPerEntity = memoryConsumptionPerEntity;
@@ -141,6 +142,7 @@ public class CacheBuffer {
         this.clock = clock;
         this.checkpointDao = checkpointDao;
         this.modelTtl = modelTtl;
+        this.evictionLock = new ReentrantLock();
     }
 
     /**
@@ -255,21 +257,32 @@ public class CacheBuffer {
     }
 
     /**
-     * remove the smallest priority item
+     * remove the smallest priority item.
      */
     public void remove() {
-        PriorityNode smallest = priorityMinHeap.pollFirst();
-        if (smallest != null) {
-            String keyToRemove = smallest.key;
-            ModelState<EntityModel> valueRemoved = remove(keyToRemove);
-            removalListener
-                .onRemoval(
+        try {
+            // stop evicting if the lock is held.  The entries will be eventually
+            // evicted.
+            if (!evictionLock.tryLock()) {
+                return;
+            }
+
+            PriorityNode smallest = priorityMinHeap.pollFirst();
+            if (smallest != null) {
+                String keyToRemove = smallest.key;
+                ModelState<EntityModel> valueRemoved = remove(keyToRemove);
+                removalListener.onRemoval(
                     new RemovalNotification<String, ModelState<EntityModel>>(
                         keyToRemove,
                         valueRemoved,
                         RemovalNotification.RemovalReason.REPLACED
                     )
                 );
+            }
+        } finally {
+            if (evictionLock.isHeldByCurrentThread()) {
+                evictionLock.unlock();
+            }
         }
     }
 
@@ -341,7 +354,7 @@ public class CacheBuffer {
                 ModelState<EntityModel> modelState = entry.getValue();
                 Instant now = clock.instant();
 
-                checkpointDao.prepareBulk(modelState, modelId);
+                checkpointDao.write(modelState, modelId);
 
                 if (modelState.getLastUsedTime().plus(modelTtl).isBefore(now)) {
                     toRemove.add(new PriorityNode(modelId, modelState.getPriority()));
@@ -350,13 +363,39 @@ public class CacheBuffer {
                 LOG.warn("Failed to finish maintenance for model id " + modelId, e);
             }
         });
-        // We cannot remove inside the above forEach loop because the code throws
-        // ConcurrentModificationException if we do so. This is not a problem
-        // if items is a ConcurrentHashMap. We don't use ConcurrentHashMap
-        // because it is inherently more complex and costly.
-        toRemove.forEach(item -> {
-            priorityMinHeap.remove(item);
-            remove(item.key);
-        });
+        // We don't remove inside the above forEach loop to lock as few places as possible.
+        try {
+            // stop evicting if the lock is held. The entries will be eventually
+            // evicted.
+            if (!evictionLock.tryLock()) {
+                return;
+            }
+
+            toRemove.forEach(item -> {
+                priorityMinHeap.remove(item);
+                remove(item.key);
+            });
+        } finally {
+            if (evictionLock.isHeldByCurrentThread()) {
+                evictionLock.unlock();
+            }
+        }
+    }
+
+    /**
+     *
+     * @return the number of active entities
+     */
+    public int getActiveEntities() {
+        return items.size();
+    }
+
+    /**
+     *
+     * @param modelId Model Id
+     * @return Whether the model is active or not
+     */
+    public boolean isActive(String modelId) {
+        return items.containsKey(modelId);
     }
 }

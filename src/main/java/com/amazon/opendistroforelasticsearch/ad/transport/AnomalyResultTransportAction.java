@@ -16,6 +16,7 @@
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
 import java.net.ConnectException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -47,6 +48,7 @@ import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.node.NodeClosedException;
@@ -130,7 +132,8 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         ADCircuitBreakerService adCircuitBreakerService,
         ADStats adStats,
         ThreadPool threadPool,
-        SearchFeatureDao searchFeatureDao
+        SearchFeatureDao searchFeatureDao,
+        Clock clock
     ) {
         super(AnomalyResultAction.NAME, transportService, actionFilters, AnomalyResultRequest::new);
         this.transportService = transportService;
@@ -274,19 +277,33 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                 }
 
                 ActionListener<Map<String, double[]>> getEntityFeatureslistener = ActionListener.wrap(entityFeatures -> {
-                    entityFeatures
-                        .entrySet()
-                        .stream()
-                        .collect(
-                            Collectors
-                                .groupingBy(e -> hashRing.getOwningNode(e.getKey()).get(), Collectors.toMap(Entry::getKey, Entry::getValue))
-                        )
-                        .entrySet()
-                        .stream()
-                        .forEach(nodeEntity -> {
-                            DiscoveryNode node = nodeEntity.getKey();
-                            transportService
-                                .sendRequest(
+                    if (entityFeatures.isEmpty()) {
+                        // Feature not available is common when we have data holes. Respond empty response
+                        // so that alerting will not print stack trace to avoid bloating our logs.
+                        LOG.info("No data in current detection window between {} and {} for {}", dataStartTime, dataEndTime, adID);
+                        listener.onResponse(
+                            new AnomalyResultResponse(
+                                Double.NaN,
+                                Double.NaN,
+                                Double.NaN,
+                                new ArrayList<FeatureData>(),
+                                "No data in current detection window"
+                            )
+                        );
+                    } else {
+                        entityFeatures.entrySet()
+                            .stream()
+                            .collect(
+                                Collectors.groupingBy(
+                                    e -> hashRing.getOwningNode(e.getKey()).get(),
+                                    Collectors.toMap(Entry::getKey, Entry::getValue)
+                                )
+                            )
+                            .entrySet()
+                            .stream()
+                            .forEach(nodeEntity -> {
+                                DiscoveryNode node = nodeEntity.getKey();
+                                transportService.sendRequest(
                                     node,
                                     EntityResultAction.NAME,
                                     new EntityResultRequest(adID, nodeEntity.getValue(), dataStartTime, dataEndTime),
@@ -297,9 +314,9 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                                         ThreadPool.Names.SAME
                                     )
                                 );
-                        }
+                            });
+                    }
 
-                        );
                     listener.onResponse(new AnomalyResultResponse(0, 0, 0, new ArrayList<FeatureData>()));
                 }, exception -> handleFeatureQueryFailure(exception, listener, adID));
 
@@ -865,14 +882,13 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
             return;
         }
 
-        stateManager.setColdStartRunning(detectorId, true);
+        final Releasable coldStartFinishingCallback = stateManager.markColdStartRunning(detectorId);
 
         ActionListener<Optional<double[][]>> listener = ActionListener.wrap(trainingData -> {
             if (trainingData.isPresent()) {
                 double[][] dataPoints = trainingData.get();
 
                 ActionListener<Void> trainModelListener = ActionListener.wrap(res -> {
-                    stateManager.setColdStartRunning(detectorId, false);
                     LOG.info("Succeeded in training {}", detectorId);
                 }, exception -> {
                     if (exception instanceof AnomalyDetectionException) {
@@ -898,7 +914,6 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                                 new EndRunException(detectorId, "Error while training model", exception, false)
                             );
                     }
-                    stateManager.setColdStartRunning(detectorId, false);
                 });
 
                 modelManager
@@ -909,7 +924,6 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                     );
             } else {
                 stateManager.setLastColdStartException(detectorId, new EndRunException(detectorId, "Cannot get training data", false));
-                stateManager.setColdStartRunning(detectorId, false);
             }
         }, exception -> {
             if (exception instanceof ElasticsearchTimeoutException) {
@@ -925,8 +939,9 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                 stateManager
                     .setLastColdStartException(detectorId, new EndRunException(detectorId, "Error while cold start", exception, false));
             }
-            stateManager.setColdStartRunning(detectorId, false);
         });
+
+        final ActionListener<Optional<double[][]>> listenerWithReleaseCallback = ActionListener.runAfter(listener, coldStartFinishingCallback::close);
 
         threadPool
             .executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME)
@@ -934,7 +949,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                 () -> featureManager
                     .getColdStartData(
                         detector,
-                        new ThreadedActionListener<>(LOG, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, listener, false)
+                        new ThreadedActionListener<>(LOG, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, listenerWithReleaseCallback, false)
                     )
             );
     }

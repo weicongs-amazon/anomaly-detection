@@ -15,6 +15,8 @@
 
 package com.amazon.opendistroforelasticsearch.ad.ml;
 
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.COOLDOWN_MINUTES;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -26,6 +28,9 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -37,6 +42,9 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ThreadedActionListener;
+import org.elasticsearch.common.lease.Releasable;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.threadpool.ThreadPool;
 
@@ -53,7 +61,6 @@ import com.amazon.randomcutforest.RandomCutForest;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import com.google.common.util.concurrent.RateLimiter;
 
 /**
  * Training models for multi-entity detectors
@@ -62,7 +69,6 @@ import com.google.common.util.concurrent.RateLimiter;
 public class EntityColdStarter {
     private static final Logger logger = LogManager.getLogger(EntityColdStarter.class);
     private final Clock clock;
-    private final RateLimiter limiter;
     private final ThreadPool threadPool;
     private final NodeStateManager nodeStateManager;
     private final int rcfSampleSize;
@@ -84,6 +90,7 @@ public class EntityColdStarter {
     private final FeatureManager featureManager;
     private final LoadingCache<String, Instant> lastColdStartTime;
     private final CheckpointDao checkpointDao;
+    private int coolDownMinutes;
 
     /**
      * Constructor
@@ -134,12 +141,11 @@ public class EntityColdStarter {
         FeatureManager featureManager,
         Duration lastColdStartTimestampTtl,
         long maxCacheSize,
-        CheckpointDao checkpointDao
+        CheckpointDao checkpointDao,
+        Settings settings
     ) {
         this.clock = clock;
         this.lastThrottledColdStartTime = Instant.MIN;
-        // 1 cold start per 4 seconds allowed.
-        this.limiter = RateLimiter.create(0.25);
         this.threadPool = threadPool;
         this.nodeStateManager = nodeStateManager;
         this.rcfSampleSize = rcfSampleSize;
@@ -173,6 +179,7 @@ public class EntityColdStarter {
             .concurrencyLevel(1)
             .build(loader);
         this.checkpointDao = checkpointDao;
+        this.coolDownMinutes = (int)(COOLDOWN_MINUTES.get(settings).getMinutes());
     }
 
     /**
@@ -183,18 +190,31 @@ public class EntityColdStarter {
      * @param modelState model state associated with the entity
      */
     private void coldStart(String modelId, String entityName, String detectorId, ModelState<EntityModel> modelState) {
+        // Rate limiting: if last cold start is not finished, we don't trigger another one.
+        if (nodeStateManager.isColdStartRunning(detectorId)) {
+            return;
+        }
+
         // Won't retry cold start within one hour for an entity; if threadpool queue full, won't retry within 5 minutes
         // 5 minutes is derived by 1000 (threadpool queue size) / 4 (1 cold start per 4 seconds according to the Http logs
         // experiment) = 250 seconds.
         if (lastColdStartTime.getIfPresent(modelId) == null
-            && limiter.tryAcquire()
-            && lastThrottledColdStartTime.plus(Duration.ofMinutes(5)).isBefore(clock.instant())) {
+            && lastThrottledColdStartTime.plus(Duration.ofMinutes(coolDownMinutes)).isBefore(clock.instant())) {
+
+            final Releasable coldStartFinishingCallback = nodeStateManager.markColdStartRunning(detectorId);
+
             logger.debug("Trigger cold start for {}", modelId);
 
             ActionListener<Optional<List<double[][]>>> nestedListener = ActionListener.wrap(trainingData -> {
                 if (trainingData.isPresent()) {
+
                     List<double[][]> dataPoints = trainingData.get();
-                    trainModelFromDataSegments(dataPoints, modelId, modelState);
+                    // only train models if we have enough samples
+                    if (hasEnoughSample(dataPoints, modelState) == false) {
+                        combineTrainSamples(dataPoints, modelState);
+                    } else {
+                        trainModelFromDataSegments(dataPoints, modelId, modelState);
+                    }
                     logger.info("Succeeded in training entity: {}", modelId);
                 } else {
                     logger.info("Cannot get training data for {}", modelId);
@@ -211,6 +231,8 @@ public class EntityColdStarter {
                 }
             });
 
+            final ActionListener<Optional<List<double[][]>>> listenerWithReleaseCallback = ActionListener.runAfter(nestedListener, coldStartFinishingCallback::close);
+
             threadPool
                 .executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME)
                 .execute(
@@ -218,7 +240,7 @@ public class EntityColdStarter {
                         detectorId,
                         entityName,
                         shingleSize,
-                        new ThreadedActionListener<>(logger, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, nestedListener, false)
+                        new ThreadedActionListener<>(logger, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, listenerWithReleaseCallback, false)
                     )
                 );
 
@@ -283,7 +305,7 @@ public class EntityColdStarter {
         entityState.setLastUsedTime(clock.instant());
 
         // save to checkpoint
-        checkpointDao.prepareBulk(entityState, modelId);
+        checkpointDao.write(entityState, modelId);
     }
 
     /**
@@ -483,6 +505,49 @@ public class EntityColdStarter {
         } else {
             double[][] trainData = featureManager.batchShingle(samples.toArray(new double[0][0]), this.shingleSize);
             trainModelFromDataSegments(Collections.singletonList(trainData), modelId, modelState);
+        }
+    }
+
+    /**
+     * TODO: make it work for shingle.
+     *
+     * @param dataPoints training data generated from cold start
+     * @param entityState entity State
+     * @return whether the total available sample size meets our minimum sample requirement
+     */
+    private boolean hasEnoughSample(List<double[][]> dataPoints, ModelState<EntityModel> entityState) {
+        int totalSize = 0;
+        for (double[][] consecutivePoints : dataPoints) {
+            totalSize += consecutivePoints.length;
+        }
+        EntityModel model = entityState.getModel();
+        if (model != null) {
+            totalSize += model.getSamples().size();
+        }
+
+        return totalSize >= this.numMinSamples;
+    }
+
+    /**
+     * TODO: make it work for shingle
+     * Precondition: we don't have enough training data.
+     * Combine training data with existing sample data.  Existing samples either
+     * predates or coincide with cold start data.  In either case, combining them
+     * without reorder based on timestamp is fine.  RCF on one-dimensional datapoints
+     * without shingling is similar to just using CDF sketch on the values.  We
+     * are just finding extreme values.
+     *
+     * @param coldstartDatapoints training data generated from cold start
+     * @param entityState entity State
+     */
+    private void combineTrainSamples(List<double[][]> coldstartDatapoints, ModelState<EntityModel> entityState) {
+        EntityModel model = entityState.getModel();
+        if (model != null) {
+            for (double[][] consecutivePoints : coldstartDatapoints) {
+                for (int i = 0; i < consecutivePoints.length; i++) {
+                    model.addSample(consecutivePoints[i]);
+                }
+            }
         }
     }
 }

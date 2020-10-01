@@ -45,6 +45,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ThreadedActionListener;
 import org.elasticsearch.threadpool.ThreadPool;
 
+import com.amazon.opendistroforelasticsearch.ad.CleanState;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.Interpolator;
@@ -53,7 +54,7 @@ import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 /**
  * A facade managing feature data operations and buffers.
  */
-public class FeatureManager {
+public class FeatureManager implements CleanState {
 
     private static final Logger logger = LogManager.getLogger(FeatureManager.class);
 
@@ -444,6 +445,7 @@ public class FeatureManager {
      *
      * @param detectorId ID of the detector
      */
+    @Override
     public void clear(String detectorId) {
         detectorIdsToTimeShingles.remove(detectorId);
     }
