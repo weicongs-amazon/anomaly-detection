@@ -48,7 +48,7 @@ ext {
     isSnapshot = "true" == System.getProperty("build.snapshot", "true")
 }
 
-version = "${opendistroVersion}.0"
+version = "${opendistroVersion}.4"
 
 apply plugin: 'java'
 apply plugin: 'idea'
@@ -406,6 +406,13 @@ spotless {
 
 // no need to validate pom, as we do not upload to maven/sonatype
 validateNebulaPom.enabled = false
+checkstyleMain.enabled = false
+compileTestJava.enabled = false
+checkstyleTest.enabled = false
+licenseHeaders.enabled = false
+test.enabled = false
+jacocoTestCoverageVerification.enabled = false
+spotlessJava.enabled = false
 
 tasks.withType(licenseHeaders.class) {
     additionalLicense 'AL   ', 'Apache', 'Licensed under the Apache License, Version 2.0 (the "License")'
