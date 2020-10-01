@@ -202,7 +202,7 @@ public class PriorityCache implements EntityCache {
                             if (exception instanceof IndexNotFoundException) {
                                 modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, state);
                             }  if (exception instanceof EsRejectedExecutionException || exception instanceof RejectedExecutionException) {
-                                LOG.error("too many requests");
+                                LOG.error("too many requests",  exception);
                                 lastThrottledRestoreTime = Instant.now();
                             }
                             else {
