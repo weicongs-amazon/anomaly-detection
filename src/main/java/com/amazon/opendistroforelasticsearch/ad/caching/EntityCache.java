@@ -15,21 +15,53 @@
 
 package com.amazon.opendistroforelasticsearch.ad.caching;
 
+import com.amazon.opendistroforelasticsearch.ad.CleanState;
 import com.amazon.opendistroforelasticsearch.ad.MaintenanceState;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelState;
+import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 
-public interface EntityCache extends MaintenanceState {
+public interface EntityCache extends MaintenanceState, CleanState {
     /**
      * Get the ModelState associated with the entity.  May or may not load the
      * ModelState depending on the underlying cache's eviction policy.
      *
      * @param modelId Model Id
-     * @param detectorId Detector Id
+     * @param detector Detector config object
      * @param datapoint The most recent data point
      * @param entityName The Entity's name
      * @return the ModelState associated with the model or null if no cached item
      * for the entity
      */
-    ModelState<EntityModel> get(String modelId, String detectorId, double[] datapoint, String entityName);
+    ModelState<EntityModel> get(String modelId, AnomalyDetector detector, double[] datapoint, String entityName);
+
+    /**
+     * Get the number of active entities of a detector
+     * @param detector Detector Id
+     * @return The number of active entities
+     */
+    int getActiveEntities(String detector);
+
+    /**
+     * Whether an entity is active or not
+     * @param detectorId The Id of the detector that an entity belongs to
+     * @param entityId Entity Id
+     * @return Whether an entity is active or not
+     */
+    boolean isActive(String detectorId, String entityId);
+
+    /**
+     *
+     * @param detectorId Detector Id
+     * @return a value between 0 and 1 indicating the percentage of a detector's initialization
+     */
+    float getInitProgress(String detectorId);
+
+    /**
+     *
+     * @param detectorId The Id of the detector that an entity belongs to
+     * @param entityId Entity Id
+     * @return a value between 0 and 1 indicating the percentage of a detector's initialization
+     */
+    float getInitProgress(String detectorId, String entityId);
 }

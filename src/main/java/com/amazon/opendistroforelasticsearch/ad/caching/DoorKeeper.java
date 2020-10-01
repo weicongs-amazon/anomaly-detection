@@ -15,6 +15,10 @@
 
 package com.amazon.opendistroforelasticsearch.ad.caching;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+
 import com.amazon.opendistroforelasticsearch.ad.MaintenanceState;
 import com.google.common.base.Charsets;
 import com.google.common.hash.BloomFilter;
@@ -35,12 +39,15 @@ public class DoorKeeper implements MaintenanceState {
     private final long expectedInsertions;
     // the desired false positive probability (must be positive and less than 1.0)
     private final double fpp;
-    private int flood_gate_delta;
+    private Instant lastMaintenanceTime;
+    private final Duration stateTtl;
+    private final Clock clock;
 
-    public DoorKeeper(long expectedInsertions, double fpp, int flood_gate_delta) {
+    public DoorKeeper(long expectedInsertions, double fpp, Duration stateTtl, Clock clock) {
         this.expectedInsertions = expectedInsertions;
         this.fpp = fpp;
-        this.flood_gate_delta = flood_gate_delta;
+        this.stateTtl = stateTtl;
+        this.clock = clock;
         maintenance();
     }
 
@@ -53,15 +60,14 @@ public class DoorKeeper implements MaintenanceState {
     }
 
     /**
-     * We reset the bloom filter when the total number of distinct elements
-     * exceeds expected insertions or is approaching limit.
+     * We reset the bloom filter when bloom filter is null or it is state ttl is reached
      */
     @Override
     public void maintenance() {
         if (bloomFilter == null
-            || bloomFilter.approximateElementCount() >= expectedInsertions
-            || Math.abs(bloomFilter.approximateElementCount() - expectedInsertions) <= flood_gate_delta) {
+            || lastMaintenanceTime.plus(stateTtl).isBefore(clock.instant())) {
             bloomFilter = BloomFilter.create(Funnels.stringFunnel(Charsets.US_ASCII), expectedInsertions, fpp);
+            lastMaintenanceTime = Instant.now();
         }
     }
 }

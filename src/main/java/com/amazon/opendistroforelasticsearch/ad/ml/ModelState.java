@@ -78,7 +78,7 @@ public class ModelState<T> implements ExpiringState {
      *
      * @return the created model state
      */
-    public static <T> ModelState<T> createClassicModelState(T model, String modelId, String detectorId, String modelType, Clock clock) {
+    public static <T> ModelState<T> createSingleEntityModelState(T model, String modelId, String detectorId, String modelType, Clock clock) {
         return new ModelState<>(model, modelId, detectorId, modelType, clock, 0f);
     }
 

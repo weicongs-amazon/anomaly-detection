@@ -53,8 +53,9 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
+import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 
 public class RolloverTests extends ESTestCase {
     private AnomalyDetectionIndices adIndices;
@@ -79,7 +80,7 @@ public class RolloverTests extends ESTestCase {
                     new HashSet<>(
                         Arrays
                             .asList(
-                                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS,
+                                AnomalyDetectorSettings.SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD
                             )
@@ -96,7 +97,9 @@ public class RolloverTests extends ESTestCase {
         when(client.admin()).thenReturn(adminClient);
         when(adminClient.indices()).thenReturn(indicesClient);
 
-        adIndices = new AnomalyDetectionIndices(client, clusterService, threadPool, settings);
+        DiscoveryNodeFilterer nodeFilter = mock(DiscoveryNodeFilterer.class);
+
+        adIndices = new AnomalyDetectionIndices(client, clusterService, threadPool, settings, nodeFilter);
 
         clusterAdminClient = mock(ClusterAdminClient.class);
         when(adminClient.cluster()).thenReturn(clusterAdminClient);
@@ -110,7 +113,7 @@ public class RolloverTests extends ESTestCase {
             return null;
         }).when(clusterAdminClient).state(any(), any());
 
-        defaultMaxDocs = AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
+        defaultMaxDocs = AnomalyDetectorSettings.SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
     }
 
     private IndexMetadata indexMeta(String name, long creationDate, String... aliases) {
@@ -131,7 +134,7 @@ public class RolloverTests extends ESTestCase {
     }
 
     private void assertRolloverRequest(RolloverRequest request) {
-        assertEquals(AnomalyResult.ANOMALY_RESULT_INDEX, request.indices()[0]);
+        assertEquals(CommonName.ANOMALY_RESULT_INDEX_ALIAS, request.indices()[0]);
 
         Map<String, Condition<?>> conditions = request.getConditions();
         assertEquals(1, conditions.size());
@@ -156,7 +159,7 @@ public class RolloverTests extends ESTestCase {
 
         Metadata.Builder metaBuilder = Metadata
             .builder()
-            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 1L, AnomalyResult.ANOMALY_RESULT_INDEX), true);
+            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 1L, CommonName.ANOMALY_RESULT_INDEX_ALIAS), true);
         clusterState = ClusterState.builder(clusterName).metadata(metaBuilder.build()).build();
         when(clusterService.state()).thenReturn(clusterState);
 
@@ -171,7 +174,7 @@ public class RolloverTests extends ESTestCase {
             @SuppressWarnings("unchecked")
             ActionListener<RolloverResponse> listener = (ActionListener<RolloverResponse>) invocation.getArgument(1);
 
-            assertEquals(AnomalyResult.ANOMALY_RESULT_INDEX, request.indices()[0]);
+            assertEquals(CommonName.ANOMALY_RESULT_INDEX_ALIAS, request.indices()[0]);
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
@@ -186,12 +189,12 @@ public class RolloverTests extends ESTestCase {
 
         Metadata.Builder metaBuilder = Metadata
             .builder()
-            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 1L, AnomalyResult.ANOMALY_RESULT_INDEX), true)
+            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 1L, CommonName.ANOMALY_RESULT_INDEX_ALIAS), true)
             .put(
                 indexMeta(
                     ".opendistro-anomaly-results-history-2020.06.24-000004",
                     Instant.now().toEpochMilli(),
-                    AnomalyResult.ANOMALY_RESULT_INDEX
+                    CommonName.ANOMALY_RESULT_INDEX_ALIAS
                 ),
                 true
             );
@@ -210,7 +213,7 @@ public class RolloverTests extends ESTestCase {
             @SuppressWarnings("unchecked")
             ActionListener<RolloverResponse> listener = (ActionListener<RolloverResponse>) invocation.getArgument(1);
 
-            assertEquals(AnomalyResult.ANOMALY_RESULT_INDEX, request.indices()[0]);
+            assertEquals(CommonName.ANOMALY_RESULT_INDEX_ALIAS, request.indices()[0]);
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
@@ -225,13 +228,13 @@ public class RolloverTests extends ESTestCase {
 
         Metadata.Builder metaBuilder = Metadata
             .builder()
-            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000002", 1L, AnomalyResult.ANOMALY_RESULT_INDEX), true)
-            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 2L, AnomalyResult.ANOMALY_RESULT_INDEX), true)
+            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000002", 1L, CommonName.ANOMALY_RESULT_INDEX_ALIAS), true)
+            .put(indexMeta(".opendistro-anomaly-results-history-2020.06.24-000003", 2L, CommonName.ANOMALY_RESULT_INDEX_ALIAS), true)
             .put(
                 indexMeta(
                     ".opendistro-anomaly-results-history-2020.06.24-000004",
                     Instant.now().toEpochMilli(),
-                    AnomalyResult.ANOMALY_RESULT_INDEX
+                    CommonName.ANOMALY_RESULT_INDEX_ALIAS
                 ),
                 true
             );

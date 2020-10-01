@@ -21,6 +21,7 @@ import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpect
 import static org.elasticsearch.index.query.AbstractQueryBuilder.parseInnerQueryBuilder;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -473,5 +474,9 @@ public class AnomalyDetector implements ToXContentObject {
 
     public long getDetectorIntervalInSeconds() {
         return getDetectorIntervalInMilliseconds() / 1000;
+    }
+
+    public Duration getDetectionIntervalDuration() {
+        return ((IntervalTimeConfiguration) getDetectionInterval()).toDuration();
     }
 }

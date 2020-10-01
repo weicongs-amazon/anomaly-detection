@@ -293,7 +293,7 @@ public class NodeStateManagerTests extends ESTestCase {
 
     public void testColdStartRunning() {
         assertTrue(!stateManager.isColdStartRunning(adId));
-        stateManager.setColdStartRunning(adId, true);
+        stateManager.markColdStartRunning(adId);
         assertTrue(stateManager.isColdStartRunning(adId));
     }
 }

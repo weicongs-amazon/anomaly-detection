@@ -34,6 +34,8 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.bulk.BulkAction;
@@ -57,6 +59,7 @@ import org.elasticsearch.index.reindex.DeleteByQueryRequest;
 import org.elasticsearch.index.reindex.ScrollableHitSource;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.util.BulkUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.randomcutforest.RandomCutForest;
@@ -103,6 +106,7 @@ public class CheckpointDao {
     private final Class<? extends ThresholdingModel> thresholdingModelClass;
     private final Duration checkpointInterval;
     private final Clock clock;
+    private final AnomalyDetectionIndices indexUtil;
 
     /**
      * Constructor with dependencies and configuration.
@@ -124,7 +128,8 @@ public class CheckpointDao {
         RandomCutForestSerDe rcfSerde,
         Class<? extends ThresholdingModel> thresholdingModelClass,
         Clock clock,
-        Duration checkpointInterval
+        Duration checkpointInterval,
+        AnomalyDetectionIndices indexUtil
     ) {
         this.client = client;
         this.clientUtil = clientUtil;
@@ -136,6 +141,7 @@ public class CheckpointDao {
         this.thresholdingModelClass = thresholdingModelClass;
         this.clock = clock;
         this.checkpointInterval = checkpointInterval;
+        this.indexUtil = indexUtil;
     }
 
     /**
@@ -152,6 +158,27 @@ public class CheckpointDao {
         source.put(FIELD_MODEL, modelCheckpoint);
         source.put(TIMESTAMP, ZonedDateTime.now(ZoneOffset.UTC));
 
+        if (indexUtil.doesCheckpointIndexExist()) {
+            saveModelCheckpointSync(source, modelId);
+        } else {
+            indexUtil.initCheckpointIndex(ActionListener.wrap(initResponse -> {
+                if (initResponse.isAcknowledged()) {
+                    saveModelCheckpointSync(source, modelId);
+                } else {
+                    throw new RuntimeException("Creating checkpoint with mappings call not acknowledged.");
+                }
+            }, exception -> {
+                if (ExceptionsHelper.unwrapCause(exception) instanceof ResourceAlreadyExistsException) {
+                    // It is possible the index has been created while we sending the create request
+                    saveModelCheckpointSync(source, modelId);
+                } else {
+                    throw new RuntimeException(String.format("Unexpected error creating index %s", indexName), exception);
+                }
+            }));
+        }
+    }
+
+    private void saveModelCheckpointSync(Map<String, Object> source, String modelId) {
         clientUtil.<IndexRequest, IndexResponse>timedRequest(new IndexRequest(indexName).id(modelId).source(source), logger, client::index);
     }
 
@@ -166,18 +193,39 @@ public class CheckpointDao {
         Map<String, Object> source = new HashMap<>();
         source.put(FIELD_MODEL, modelCheckpoint);
         source.put(TIMESTAMP, ZonedDateTime.now(ZoneOffset.UTC));
+        if (indexUtil.doesCheckpointIndexExist()) {
+            saveModelCheckpointAsync(source, modelId, listener);
+        } else {
+            indexUtil.initCheckpointIndex(ActionListener.wrap(initResponse -> {
+                if (initResponse.isAcknowledged()) {
+                    saveModelCheckpointAsync(source, modelId, listener);
+                } else {
+                    throw new RuntimeException("Creating checkpoint with mappings call not acknowledged.");
+                }
+            }, exception -> {
+                if (ExceptionsHelper.unwrapCause(exception) instanceof ResourceAlreadyExistsException) {
+                    // It is possible the index has been created while we sending the create request
+                    saveModelCheckpointAsync(source, modelId, listener);
+                } else {
+                    throw new RuntimeException(String.format("Unexpected error creating index %s", indexName), exception);
+                }
+            }));
+        }
+    }
+
+    private void saveModelCheckpointAsync(Map<String, Object> source, String modelId, ActionListener<Void> listener) {
         clientUtil
-            .<IndexRequest, IndexResponse>asyncRequest(
-                new IndexRequest(indexName).id(modelId).source(source),
-                client::index,
-                ActionListener.wrap(r -> listener.onResponse(null), listener::onFailure)
-            );
+        .<IndexRequest, IndexResponse>asyncRequest(
+            new IndexRequest(indexName).id(modelId).source(source),
+            client::index,
+            ActionListener.wrap(r -> listener.onResponse(null), listener::onFailure)
+        );
     }
 
     /**
      * Bulk writing model states prepared previously
      */
-    public void bulk() {
+    public void flush() {
         try {
             // in case that other threads are doing bulk as well.
             if (!lock.tryLock()) {
@@ -191,17 +239,24 @@ public class CheckpointDao {
                     bulkRequest.add(request);
                 }
 
-                clientUtil.<BulkRequest, BulkResponse>execute(BulkAction.INSTANCE, bulkRequest, ActionListener.wrap(r -> {
-                    if (r.hasFailures() == false) {
-                        logger.debug("Succeeded in bulking checkpoints");
-                    } else {
-                        requests.addAll(BulkUtil.getIndexRequestToRetry(bulkRequest, r));
-                    }
-                }, e -> {
-                    logger.error("Failed bulking checkpoints", e);
-                    // retry during next bulk.
-                    requests.addAll(toSend);
-                }));
+                if (indexUtil.doesCheckpointIndexExist()) {
+                    flush(bulkRequest, toSend);
+                } else {
+                    indexUtil.initCheckpointIndex(ActionListener.wrap(initResponse -> {
+                        if (initResponse.isAcknowledged()) {
+                            flush(bulkRequest, toSend);
+                        } else {
+                            throw new RuntimeException("Creating checkpoint with mappings call not acknowledged.");
+                        }
+                    }, exception -> {
+                        if (ExceptionsHelper.unwrapCause(exception) instanceof ResourceAlreadyExistsException) {
+                            // It is possible the index has been created while we sending the create request
+                            flush(bulkRequest, toSend);
+                        } else {
+                            throw new RuntimeException(String.format("Unexpected error creating index %s", indexName), exception);
+                        }
+                    }));
+                }
             }
         } finally {
             if (lock.isHeldByCurrentThread()) {
@@ -210,12 +265,26 @@ public class CheckpointDao {
         }
     }
 
+    private void flush(BulkRequest bulkRequest, ConcurrentLinkedQueue<DocWriteRequest<?>> toSend) {
+        clientUtil.<BulkRequest, BulkResponse>execute(BulkAction.INSTANCE, bulkRequest, ActionListener.wrap(r -> {
+            if (r.hasFailures() == false) {
+                logger.debug("Succeeded in bulking checkpoints");
+            } else {
+                requests.addAll(BulkUtil.getIndexRequestToRetry(bulkRequest, r));
+            }
+        }, e -> {
+            logger.error("Failed bulking checkpoints", e);
+            // retry during next bulk.
+            requests.addAll(toSend);
+        }));
+    }
+
     /**
      * Prepare bulking the input model state to the checkpoint index
      * @param modelState Model state
      * @param modelId Model Id
      */
-    public void prepareBulk(ModelState<EntityModel> modelState, String modelId) {
+    public void write(ModelState<EntityModel> modelState, String modelId) {
         // we don't save checkpoints within checkpointInterval again
         if (modelState.getLastCheckpointTime().plus(checkpointInterval).isAfter(clock.instant())) {
             return;

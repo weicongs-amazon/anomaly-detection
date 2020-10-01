@@ -20,10 +20,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.TreeSet;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
@@ -96,10 +97,10 @@ public class CacheBuffer {
 
     private final int minimumCapacity;
     // key -> Priority node
-    private final Map<String, PriorityNode> key2Priority;
-    private final TreeSet<PriorityNode> priorityMinHeap;
+    private final ConcurrentHashMap<String, PriorityNode> key2Priority;
+    private final ConcurrentSkipListSet<PriorityNode> priorityList;
     // key -> value
-    private final Map<String, ModelState<EntityModel>> items;
+    private final ConcurrentHashMap<String, ModelState<EntityModel>> items;
     // when detector is created.  Can be reset.  Unit: seconds
     private long landmarkSecs;
     // length of seconds in one interval.  Used to compute elapsed periods
@@ -114,6 +115,7 @@ public class CacheBuffer {
     private final Clock clock;
     private final CheckpointDao checkpointDao;
     private final Duration modelTtl;
+    private final ReentrantLock evictionLock;
 
     public CacheBuffer(
         int minimumCapacity,
@@ -125,15 +127,15 @@ public class CacheBuffer {
         Duration modelTtl
     ) {
         this.minimumCapacity = minimumCapacity;
-        this.key2Priority = new HashMap<>();
-        this.priorityMinHeap = new TreeSet<>(new PriorityNodeComparator());
-        this.items = new HashMap<>();
+        this.key2Priority = new ConcurrentHashMap<>();
+        this.priorityList = new ConcurrentSkipListSet<>(new PriorityNodeComparator());
+        this.items = new ConcurrentHashMap<>();
         this.landmarkSecs = Instant.now().getEpochSecond();
         this.intervalSecs = intervalSecs;
         this.removalListener = new RemovalListener<String, ModelState<EntityModel>>() {
             @Override
             public void onRemoval(RemovalNotification<String, ModelState<EntityModel>> n) {
-                checkpointDao.prepareBulk(n.getValue(), n.getKey());
+                checkpointDao.write(n.getValue(), n.getKey());
             }
         };
         this.memoryConsumptionPerEntity = memoryConsumptionPerEntity;
@@ -141,23 +143,24 @@ public class CacheBuffer {
         this.clock = clock;
         this.checkpointDao = checkpointDao;
         this.modelTtl = modelTtl;
+        this.evictionLock = new ReentrantLock();
     }
 
     /**
      * Update step at period t_k:
      * new priority = old priority + log(1+e^{\log(g(t_k-L))-old priority}) where g(n) = e^{0.5n},
      * and n is the period.
-     * @param modelId model Id
+     * @param entityId model Id
      */
-    private void update(String modelId) {
-        PriorityNode node = key2Priority.computeIfAbsent(modelId, k -> new PriorityNode(modelId, 0f));
+    private void update(String entityId) {
+        PriorityNode node = key2Priority.computeIfAbsent(entityId, k -> new PriorityNode(entityId, 0f));
 
         node.priority = getUpdatedPriority(node.priority);
 
         // reposition this node
-        this.priorityMinHeap.remove(node);
-        this.priorityMinHeap.add(node);
-        items.get(modelId).setLastUsedTime(clock.instant());
+        this.priorityList.remove(node);
+        this.priorityList.add(node);
+        items.get(entityId).setLastUsedTime(clock.instant());
     }
 
     public float getUpdatedPriority(float oldPriority) {
@@ -188,7 +191,7 @@ public class CacheBuffer {
      * @return the minimum priority
      */
     public float getMinimumPriority() {
-        PriorityNode smallest = priorityMinHeap.first();
+        PriorityNode smallest = priorityList.first();
         long periods = (Instant.now().getEpochSecond() - landmarkSecs) / intervalSecs;
         float detectorWeight = periods >> 1;
         return smallest.priority - detectorWeight;
@@ -196,33 +199,33 @@ public class CacheBuffer {
 
     /**
      * Insert the model state associated with a model Id to the cache
-     * @param modelId the model Id
+     * @param entityId the model Id
      * @param value the ModelState
      */
-    public void put(String modelId, ModelState<EntityModel> value) {
-        put(modelId, value, getUpdatedPriority(value.getPriority()));
+    public void put(String entityId, ModelState<EntityModel> value) {
+        put(entityId, value, getUpdatedPriority(value.getPriority()));
     }
 
     /**
     * Insert the model state associated with a model Id to the cache.  Update priority.
-    * @param modelId the model Id
+    * @param entityId the model Id
     * @param value the ModelState
     * @param priority the priority
     */
-    private void put(String modelId, ModelState<EntityModel> value, float priority) {
+    private void put(String entityId, ModelState<EntityModel> value, float priority) {
         if (minimumCapacity <= 0) {
             return;
         }
-        ModelState<EntityModel> contentNode = items.get(modelId);
+        ModelState<EntityModel> contentNode = items.get(entityId);
         if (contentNode == null) {
-            PriorityNode node = new PriorityNode(modelId, priority);
-            key2Priority.put(modelId, node);
-            priorityMinHeap.add(node);
-            items.put(modelId, value);
+            PriorityNode node = new PriorityNode(entityId, priority);
+            key2Priority.put(entityId, node);
+            priorityList.add(node);
+            items.put(entityId, value);
             value.setLastUsedTime(clock.instant());
         } else {
-            update(modelId);
-            items.put(modelId, value);
+            update(entityId);
+            items.put(entityId, value);
         }
         if (value != null && value.getModel() != null && value.getModel().getRcf() != null) {
             long memoryToShed = memoryTracker.estimateModelSize(value.getModel().getRcf());
@@ -255,21 +258,32 @@ public class CacheBuffer {
     }
 
     /**
-     * remove the smallest priority item
+     * remove the smallest priority item.
      */
     public void remove() {
-        PriorityNode smallest = priorityMinHeap.pollFirst();
-        if (smallest != null) {
-            String keyToRemove = smallest.key;
-            ModelState<EntityModel> valueRemoved = remove(keyToRemove);
-            removalListener
-                .onRemoval(
+        try {
+            // stop evicting if the lock is held.  The entries will be eventually
+            // evicted.
+            if (!evictionLock.tryLock()) {
+                return;
+            }
+
+            PriorityNode smallest = priorityList.pollFirst();
+            if (smallest != null) {
+                String keyToRemove = smallest.key;
+                ModelState<EntityModel> valueRemoved = remove(keyToRemove);
+                removalListener.onRemoval(
                     new RemovalNotification<String, ModelState<EntityModel>>(
                         keyToRemove,
                         valueRemoved,
                         RemovalNotification.RemovalReason.REPLACED
                     )
                 );
+            }
+        } finally {
+            if (evictionLock.isHeldByCurrentThread()) {
+                evictionLock.unlock();
+            }
         }
     }
 
@@ -283,10 +297,12 @@ public class CacheBuffer {
      */
     private ModelState<EntityModel> remove(String keyToRemove) {
         key2Priority.remove(keyToRemove);
+        // if shared cache is empty, we are using reserved memory
+        boolean reserved = sharedCacheEmpty();
         ModelState<EntityModel> valueRemoved = items.remove(keyToRemove);
         if (valueRemoved != null && valueRemoved.getModel() != null && valueRemoved.getModel().getRcf() != null) {
             long memoryToShed = memoryTracker.estimateModelSize(valueRemoved.getModel().getRcf());
-            memoryTracker.releaseMemory(memoryToShed, dedicatedCacheFull());
+            memoryTracker.releaseMemory(memoryToShed, reserved);
         }
         return valueRemoved;
     }
@@ -299,9 +315,9 @@ public class CacheBuffer {
     }
 
     /**
-     * @return whether dedicated cache is full or not
+     * @return whether shared cache is empty or not
      */
-    public boolean dedicatedCacheFull() {
+    public boolean sharedCacheEmpty() {
         return items.size() <= minimumCapacity;
     }
 
@@ -325,38 +341,87 @@ public class CacheBuffer {
 
     /**
      * Replace the smallest priority entity with the input entity
-     * @param modelId the Model Id
+     * @param entityId the Model Id
      * @param value the model State
      */
-    public void replace(String modelId, ModelState<EntityModel> value) {
+    public void replace(String entityId, ModelState<EntityModel> value) {
         remove();
-        put(modelId, value);
+        put(entityId, value);
     }
 
     public void maintenance() {
         List<PriorityNode> toRemove = new ArrayList<>();
         items.entrySet().stream().forEach(entry -> {
-            String modelId = entry.getKey();
+            String entityId = entry.getKey();
             try {
                 ModelState<EntityModel> modelState = entry.getValue();
                 Instant now = clock.instant();
 
-                checkpointDao.prepareBulk(modelState, modelId);
+                // we can have ConcurrentModificationException to serializing
+                // rcf model when the rcf model is updating.  To prevent this,
+                // we need to have a deep copy of models.  This is costly.
+                // As we are gonna retry serializing either when the entity is
+                // evicted out of cache or during the next maintenance period,
+                // don't do anything when ConcurrentModificationException happens.
+                checkpointDao.write(modelState, entityId);
 
                 if (modelState.getLastUsedTime().plus(modelTtl).isBefore(now)) {
-                    toRemove.add(new PriorityNode(modelId, modelState.getPriority()));
+                    toRemove.add(new PriorityNode(entityId, modelState.getPriority()));
                 }
             } catch (Exception e) {
-                LOG.warn("Failed to finish maintenance for model id " + modelId, e);
+                LOG.warn("Failed to finish maintenance for model id " + entityId, e);
             }
         });
-        // We cannot remove inside the above forEach loop because the code throws
-        // ConcurrentModificationException if we do so. This is not a problem
-        // if items is a ConcurrentHashMap. We don't use ConcurrentHashMap
-        // because it is inherently more complex and costly.
-        toRemove.forEach(item -> {
-            priorityMinHeap.remove(item);
-            remove(item.key);
-        });
+        // We don't remove inside the above forEach loop to lock as few places as possible.
+        try {
+            // stop evicting if the lock is held. The entries will be eventually
+            // evicted.
+            if (!evictionLock.tryLock()) {
+                return;
+            }
+
+            toRemove.forEach(item -> {
+                priorityList.remove(item);
+                remove(item.key);
+            });
+        } finally {
+            if (evictionLock.isHeldByCurrentThread()) {
+                evictionLock.unlock();
+            }
+        }
+    }
+
+    /**
+     *
+     * @return the number of active entities
+     */
+    public int getActiveEntities() {
+        return items.size();
+    }
+
+    /**
+     *
+     * @param entityId Model Id
+     * @return Whether the model is active or not
+     */
+    public boolean isActive(String entityId) {
+        return items.containsKey(entityId);
+    }
+
+    /**
+     *
+     * @return Get the model of highest priority entity
+     */
+    public Optional<String> getHighestPriorityEntityId() {
+        return Optional.of(priorityList).map( list -> list.last()).map(node -> node.key);
+    }
+
+    /**
+     *
+     * @param entityId entity Id
+     * @return Get the model of an entity
+     */
+    public Optional<EntityModel> getModel(String entityId) {
+        return Optional.of(items).map(map -> map.get(entityId)).map(state -> state.getModel());
     }
 }

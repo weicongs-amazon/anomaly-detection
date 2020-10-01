@@ -24,6 +24,9 @@ import java.util.List;
 
 import org.apache.commons.lang.builder.ToStringBuilder;
 import org.elasticsearch.common.ParseField;
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
@@ -37,7 +40,7 @@ import com.google.common.base.Objects;
  * Include result returned from RCF model and feature data.
  * TODO: fix rotating anomaly result index
  */
-public class AnomalyResult implements ToXContentObject {
+public class AnomalyResult implements ToXContentObject, Writeable {
 
     public static final String PARSE_FIELD_NAME = "AnomalyResult";
     public static final NamedXContentRegistry.Entry XCONTENT_REGISTRY = new NamedXContentRegistry.Entry(
@@ -45,8 +48,6 @@ public class AnomalyResult implements ToXContentObject {
         new ParseField(PARSE_FIELD_NAME),
         it -> parse(it)
     );
-
-    public static final String ANOMALY_RESULT_INDEX = ".opendistro-anomaly-results";
 
     public static final String DETECTOR_ID_FIELD = "detector_id";
     public static final String ANOMALY_SCORE_FIELD = "anomaly_score";
@@ -121,6 +122,28 @@ public class AnomalyResult implements ToXContentObject {
         this.executionEndTime = executionEndTime;
         this.error = error;
         this.entity = entity;
+    }
+
+    public AnomalyResult(StreamInput input) throws IOException {
+        this.detectorId = input.readString();
+        this.anomalyScore = input.readDouble();
+        this.anomalyGrade = input.readDouble();
+        this.confidence = input.readDouble();
+        int featureSize = input.readVInt();
+        this.featureData = new ArrayList<FeatureData>(featureSize);
+        for (int i=0; i< featureSize; i++) {
+            featureData.add(new FeatureData(input));
+        }
+        this.dataStartTime = input.readInstant();
+        this.dataEndTime = input.readInstant();
+        this.executionStartTime = input.readInstant();
+        this.executionEndTime = input.readInstant();
+        this.error = input.readString();
+        int entitySize = input.readVInt();
+        this.entity = new ArrayList<Entity>(entitySize);
+        for (int i=0; i<entitySize; i++) {
+            entity.add(new Entity(input));
+        }
     }
 
     @Override
@@ -339,5 +362,26 @@ public class AnomalyResult implements ToXContentObject {
 
     public List<Entity> getEntity() {
         return entity;
+    }
+
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeString(detectorId); ;
+        out.writeDouble(anomalyScore);
+        out.writeDouble(anomalyGrade);
+        out.writeDouble(confidence);
+        out.writeVInt(featureData.size());
+        for (FeatureData feature : featureData) {
+            feature.writeTo(out);
+        }
+        out.writeInstant(dataStartTime);
+        out.writeInstant(dataEndTime);
+        out.writeInstant(executionStartTime);
+        out.writeInstant(executionEndTime);
+        out.writeString(error);
+        out.writeVInt(entity.size());
+        for (Entity entityItem : entity) {
+            entityItem.writeTo(out);
+        }
     }
 }

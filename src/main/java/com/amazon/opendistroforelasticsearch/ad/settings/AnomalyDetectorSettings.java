@@ -81,13 +81,26 @@ public final class AnomalyDetectorSettings {
             Setting.Property.Dynamic
         );
 
-    public static final Setting<Long> AD_RESULT_HISTORY_MAX_DOCS = Setting
+    public static final Setting<Long> SINGLE_ENTITY_AD_RESULT_HISTORY_MAX_DOCS = Setting
         .longSetting(
             "opendistro.anomaly_detection.ad_result_history_max_docs",
+            // Suppose generally per cluster has 200 detectors and all run with 1 minute interval.
+            // We will get 288,000 AD result docs. So set it as 9000k to avoid multiple roll overs
+            // per day.
+            9_000_000L,
+            0L,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
+    public static final Setting<Long> MULTI_ENTITY_AD_RESULT_HISTORY_MAX_DOCS = Setting
+        .longSetting(
+            "opendistro.anomaly_detection.multi_entity_ad_result_history_max_docs",
             // Total documents in primary replica.
             // A single feature result is roughly 150 bytes. Suppose a doc is
-            // of 200 bytes, 180 million docs is of 36 GB.
-            180_000_000L,
+            // of 200 bytes, 500 million docs is of 100 GB.  We choose 100 GB
+            // because we have 2 shards at least.  Each shard can have at most 50 GB.
+            500_000_000L,
             0L,
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
@@ -150,6 +163,7 @@ public final class AnomalyDetectorSettings {
     public static final String ANOMALY_DETECTOR_JOBS_INDEX_MAPPING_FILE = "mappings/anomaly-detector-jobs.json";
     public static final String ANOMALY_RESULTS_INDEX_MAPPING_FILE = "mappings/anomaly-results.json";
     public static final String ANOMALY_DETECTION_STATE_INDEX_MAPPING_FILE = "mappings/anomaly-detection-state.json";
+    public static final String CHECKPOINT_INDEX_MAPPING_FILE = "mappings/checkpoint.json";
 
     public static final Duration HOURLY_MAINTENANCE = Duration.ofHours(1);
 
@@ -240,28 +254,42 @@ public final class AnomalyDetectorSettings {
     // cache related
     public static final int DEDICATED_CACHE_SIZE = 10;
 
-    // We keep priority (4 bytes float) and recent samples (at most 128 double array,
-    // each array has at most 5 double since we limit at most 5 features.) At most,
-    // we have 5124 bytes per entry (ignoring data structure metadata). To keep
-    // 50k entries, we need 250 MB. In a 32 GB heap, the percentage is roughly 0.008.
-    public static final float MAX_INACTIVE_ENTITIES_PERCENT = 0.008f;
-    public static final int MAX_INACTIVE_ENTITIY_STATE_BYTES = 5124;
+    // We only keep priority (4 bytes float) in inactive cache.  1 million priorities
+    // take up 4 MB.
+    public static final int MAX_INACTIVE_ENTITIES = 1_000_000;
 
     // TODO: do experiments to check how much does 1 million insertion costs in memory
     public static final int DOOR_KEEPER_MAX_INSERTION = 1_000_000;
 
-    // At most, we have 10 multi-entity detector and each one can be hit by 1000 different entities each
-    // minute. Since we check door keeper's size every hour, we keep the flood gate delta 10 * 1000 = 10000.
-    public static final int DOOR_KEEPER_FLOOD_GATE_DELTA = 10_000;
-
     public static final double DOOR_KEEPER_FAULSE_POSITIVE_RATE = 0.01;
 
+    // Increase the value will adding pressure to indexing anomaly results and our feature query
     public static final Setting<Integer> MAX_ENTITIES_PER_QUERY = Setting
         .intSetting(
             "opendistro.anomaly_detection.max_retry_for_end_run_exception",
-            10000,
+            1000,
             1,
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
         );
+
+    // save partial zero-anomaly grade results after indexing pressure reaching the limit
+    public static final Setting<Float> INDEX_PRESSURE_SOFT_LIMIT = Setting.floatSetting(
+        "opendistro.anomaly_detection.index_pressure_soft_limit",
+        0.8f,
+        0.0f,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    // max number of primary shards of an AD index
+    public static final Setting<Integer> MAX_PRIMARY_SHARDS = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_primary_shards",
+            10,
+            0,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
 }

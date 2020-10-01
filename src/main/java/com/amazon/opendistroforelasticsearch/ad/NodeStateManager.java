@@ -19,6 +19,7 @@ import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpect
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +30,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
@@ -50,7 +52,7 @@ import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
  * like AnomalyDetector object
  *
  */
-public class NodeStateManager implements MaintenanceState {
+public class NodeStateManager implements MaintenanceState, CleanState {
     private static final Logger LOG = LogManager.getLogger(NodeStateManager.class);
     private ConcurrentHashMap<String, NodeState> states;
     private Client client;
@@ -62,6 +64,8 @@ public class NodeStateManager implements MaintenanceState {
     private final Clock clock;
     private final Settings settings;
     private final Duration stateTtl;
+    // last time we are throttled due to too much index pressure
+    private Instant lastIndexThrottledTime;
 
     public static final String NO_ERROR = "no_error";
 
@@ -75,7 +79,7 @@ public class NodeStateManager implements MaintenanceState {
      * @param clock A UTC clock
      * @param stateTtl Max time to keep state in memory
      * @param modelPartitioner Used to partiton a RCF forest
-    
+
      */
     public NodeStateManager(
         Client client,
@@ -95,6 +99,7 @@ public class NodeStateManager implements MaintenanceState {
         this.clock = clock;
         this.settings = settings;
         this.stateTtl = stateTtl;
+        this.lastIndexThrottledTime = clock.instant();
     }
 
     /**
@@ -203,6 +208,7 @@ public class NodeStateManager implements MaintenanceState {
      *
      * @param adID detector ID
      */
+    @Override
     public void clear(String adID) {
         states.remove(adID);
     }
@@ -311,10 +317,24 @@ public class NodeStateManager implements MaintenanceState {
     /**
      * Mark the cold start status of the detector
      * @param adID detector ID
-     * @param running whether it is running
+     * @return a callback when cold start is done
      */
-    public void setColdStartRunning(String adID, boolean running) {
+    public Releasable markColdStartRunning(String adID) {
         NodeState state = states.computeIfAbsent(adID, id -> new NodeState(id, clock));
-        state.setColdStartRunning(running);
+        state.setColdStartRunning(true);
+        return () -> {
+            NodeState nodeState = states.get(adID);
+            if (nodeState != null) {
+                nodeState.setColdStartRunning(false);
+            }
+        };
+    }
+
+    public Instant getLastIndexThrottledTime() {
+        return lastIndexThrottledTime;
+    }
+
+    public void setLastIndexThrottledTime(Instant lastIndexThrottledTime) {
+        this.lastIndexThrottledTime = lastIndexThrottledTime;
     }
 }

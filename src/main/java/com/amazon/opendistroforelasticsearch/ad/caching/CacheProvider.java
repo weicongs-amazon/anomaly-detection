@@ -17,6 +17,7 @@ package com.amazon.opendistroforelasticsearch.ad.caching;
 
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelState;
+import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 
 /**
  * A wrapper to call concrete implementation of caching.  Used in transport
@@ -32,13 +33,38 @@ public class CacheProvider implements EntityCache {
     }
 
     @Override
-    public ModelState<EntityModel> get(String modelId, String detectorId, double[] datapoint, String entityName) {
-        return delegate.get(modelId, detectorId, datapoint, entityName);
+    public ModelState<EntityModel> get(String modelId, AnomalyDetector detector, double[] datapoint, String entityName) {
+        return delegate.get(modelId, detector, datapoint, entityName);
     }
 
     @Override
     public void maintenance() {
         delegate.maintenance();
+    }
+
+    @Override
+    public void clear(String detectorId) {
+        delegate.clear(detectorId);
+    }
+
+    @Override
+    public int getActiveEntities(String detector) {
+        return delegate.getActiveEntities(detector);
+    }
+
+    @Override
+    public boolean isActive(String detectorId, String entityId) {
+        return delegate.isActive(detectorId, entityId);
+    }
+
+    @Override
+    public float getInitProgress(String detectorId) {
+        return delegate.getInitProgress(detectorId);
+    }
+
+    @Override
+    public float getInitProgress(String detectorId, String entityId) {
+        return delegate.getInitProgress(detectorId, entityId);
     }
 
 }

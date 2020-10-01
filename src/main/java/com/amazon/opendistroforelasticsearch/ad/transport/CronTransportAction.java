@@ -29,7 +29,6 @@ import org.elasticsearch.transport.TransportService;
 
 import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
-import com.amazon.opendistroforelasticsearch.ad.caching.DoorKeeper;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 
@@ -38,7 +37,6 @@ public class CronTransportAction extends TransportNodesAction<CronRequest, CronR
     private NodeStateManager transportStateManager;
     private ModelManager modelManager;
     private FeatureManager featureManager;
-    private DoorKeeper doorKeeper;
     private CacheProvider cacheProvider;
 
     @Inject
@@ -50,7 +48,6 @@ public class CronTransportAction extends TransportNodesAction<CronRequest, CronR
         NodeStateManager tarnsportStatemanager,
         ModelManager modelManager,
         FeatureManager featureManager,
-        DoorKeeper doorKeeper,
         CacheProvider cacheProvider
     ) {
         super(
@@ -67,7 +64,6 @@ public class CronTransportAction extends TransportNodesAction<CronRequest, CronR
         this.transportStateManager = tarnsportStatemanager;
         this.modelManager = modelManager;
         this.featureManager = featureManager;
-        this.doorKeeper = doorKeeper;
         this.cacheProvider = cacheProvider;
     }
 
@@ -108,9 +104,6 @@ public class CronTransportAction extends TransportNodesAction<CronRequest, CronR
 
         // delete unused transport state
         transportStateManager.maintenance();
-
-        // reset bloom filter
-        doorKeeper.maintenance();
 
         return new CronNodeResponse(clusterService.localNode());
     }
