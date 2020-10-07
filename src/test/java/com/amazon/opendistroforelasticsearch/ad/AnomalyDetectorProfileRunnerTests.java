@@ -48,12 +48,8 @@ import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.NotSerializableExceptionWrapper;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.index.IndexNotFoundException;
-import org.elasticsearch.search.SearchModule;
-import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.transport.RemoteTransportException;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -63,7 +59,6 @@ import com.amazon.opendistroforelasticsearch.ad.common.exception.ResourceNotFoun
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
-import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorInternalState;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfile;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorState;
@@ -78,7 +73,7 @@ import com.amazon.opendistroforelasticsearch.ad.transport.RCFPollingAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.RCFPollingResponse;
 import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 
-public class AnomalyDetectorProfileRunnerTests extends ESTestCase {
+public class AnomalyDetectorProfileRunnerTests extends AbstractADTest {
     private AnomalyDetectorProfileRunner runner;
     private Client client;
     private DiscoveryNodeFilterer nodeFilter;
@@ -114,23 +109,6 @@ public class AnomalyDetectorProfileRunnerTests extends ESTestCase {
     private int detectorIntervalMin;
     private GetResponse detectorGetReponse;
     private String messaingExceptionError = "blah";
-
-    @Override
-    protected NamedXContentRegistry xContentRegistry() {
-        SearchModule searchModule = new SearchModule(Settings.EMPTY, false, Collections.emptyList());
-        List<NamedXContentRegistry.Entry> entries = searchModule.getNamedXContents();
-        entries
-            .addAll(
-                Arrays
-                    .asList(
-                        AnomalyDetector.XCONTENT_REGISTRY,
-                        AnomalyResult.XCONTENT_REGISTRY,
-                        DetectorInternalState.XCONTENT_REGISTRY,
-                        AnomalyDetectorJob.XCONTENT_REGISTRY
-                    )
-            );
-        return new NamedXContentRegistry(entries);
-    }
 
     @BeforeClass
     public static void setUpOnce() {
@@ -195,14 +173,25 @@ public class AnomalyDetectorProfileRunnerTests extends ESTestCase {
         STOPPED_ERROR
     }
 
-    @SuppressWarnings("unchecked")
     private void setUpClientGet(
         DetectorStatus detectorStatus,
         JobStatus jobStatus,
         RCFPollingStatus rcfPollingStatus,
         ErrorResultStatus errorResultStatus
     ) throws IOException {
-        detector = TestHelpers.randomAnomalyDetectorWithInterval(new IntervalTimeConfiguration(detectorIntervalMin, ChronoUnit.MINUTES));
+        setUpClientGet(detectorStatus, jobStatus, rcfPollingStatus, errorResultStatus, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void setUpClientGet(
+        DetectorStatus detectorStatus,
+        JobStatus jobStatus,
+        RCFPollingStatus rcfPollingStatus,
+        ErrorResultStatus errorResultStatus,
+        boolean hcDetector
+    ) throws IOException {
+        detector = TestHelpers
+            .randomAnomalyDetectorWithInterval(new IntervalTimeConfiguration(detectorIntervalMin, ChronoUnit.MINUTES), hcDetector);
         doAnswer(invocation -> {
             Object[] args = invocation.getArguments();
             GetRequest request = (GetRequest) args[0];
@@ -504,8 +493,20 @@ public class AnomalyDetectorProfileRunnerTests extends ESTestCase {
                 }
             };
 
-            ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(discoveryNode1, modelSizeMap1, shingleSize);
-            ProfileNodeResponse profileNodeResponse2 = new ProfileNodeResponse(discoveryNode2, modelSizeMap2, -1);
+            ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(
+                discoveryNode1,
+                modelSizeMap1,
+                shingleSize,
+                10,
+                requiredSamples - neededSamples
+            );
+            ProfileNodeResponse profileNodeResponse2 = new ProfileNodeResponse(
+                discoveryNode2,
+                modelSizeMap2,
+                -1,
+                20,
+                requiredSamples - neededSamples - 1
+            );
             List<ProfileNodeResponse> profileNodeResponses = Arrays.asList(profileNodeResponse1, profileNodeResponse2);
             List<FailedNodeException> failures = Collections.emptyList();
             ProfileResponse profileResponse = new ProfileResponse(new ClusterName(clusterName), profileNodeResponses, failures);
@@ -606,6 +607,26 @@ public class AnomalyDetectorProfileRunnerTests extends ESTestCase {
 
     public void testInitProgress() throws IOException, InterruptedException {
         setUpClientGet(DetectorStatus.EXIST, JobStatus.ENABLED, RCFPollingStatus.INITTING, ErrorResultStatus.NO_ERROR);
+        DetectorProfile expectedProfile = new DetectorProfile.Builder().state(DetectorState.INIT).build();
+
+        // 123 / 128 rounded to 96%
+        InitProgressProfile profile = new InitProgressProfile("96%", neededSamples * detectorIntervalMin, neededSamples);
+        expectedProfile.setInitProgress(profile);
+        final CountDownLatch inProgressLatch = new CountDownLatch(1);
+
+        runner.profile(detector.getDetectorId(), ActionListener.wrap(response -> {
+            assertEquals(expectedProfile, response);
+            inProgressLatch.countDown();
+        }, exception -> {
+            assertTrue("Should not reach here ", false);
+            inProgressLatch.countDown();
+        }), stateInitProgress);
+        assertTrue(inProgressLatch.await(100, TimeUnit.SECONDS));
+    }
+
+    public void testInitProgressForHCDetector() throws IOException, InterruptedException {
+        setUpClientGet(DetectorStatus.EXIST, JobStatus.ENABLED, RCFPollingStatus.INITTING, ErrorResultStatus.NO_ERROR, true);
+        setUpClientExecuteProfileAction();
         DetectorProfile expectedProfile = new DetectorProfile.Builder().state(DetectorState.INIT).build();
 
         // 123 / 128 rounded to 96%
