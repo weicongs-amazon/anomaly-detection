@@ -55,7 +55,7 @@ public class SearchAnomalyResultActionTests extends ESIntegTestCase {
         };
     }
 
-    @Test
+    // @Test
     public void testSearchResponse() {
         // Will call response.onResponse as Index exists
         Settings indexSettings = Settings.builder().put("index.number_of_shards", 5).put("index.number_of_replicas", 1).build();
