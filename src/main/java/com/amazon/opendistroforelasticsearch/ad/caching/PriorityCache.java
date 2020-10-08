@@ -291,9 +291,11 @@ public class PriorityCache implements EntityCache {
                             Throwable cause = Throwables.getRootCause(exception);
                             if (cause instanceof IndexNotFoundException) {
                                 modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, state);
+
                             } else if (cause instanceof RejectedExecutionException) {
-                                LOG.error("too many requests");
+                                LOG.error("too many requests", cause);
                                 lastThrottledRestoreTime = clock.instant();
+
                             } else {
                                 LOG.error("Fail to restore models for " + modelId, exception);
                             }
