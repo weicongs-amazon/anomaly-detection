@@ -751,7 +751,7 @@ public class SearchFeatureDao {
                     .collect(
                         Collectors.toMap(Terms.Bucket::getKeyAsString, bucket -> parseBucket(bucket, detector.getEnabledFeatureIds()).get())
                     );
-
+                logger.info("Weicongs-Testing: AD entities size:{}", results.size());
                 listener.onResponse(results);
             }, listener::onFailure);
 

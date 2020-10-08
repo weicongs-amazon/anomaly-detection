@@ -255,7 +255,7 @@ public final class AnomalyDetectorSettings {
     public static final Setting<Integer> MAX_ENTITIES_PER_QUERY = Setting
         .intSetting(
             "opendistro.anomaly_detection.max_retry_for_end_run_exception",
-            1000,
+            100000,
             1,
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
