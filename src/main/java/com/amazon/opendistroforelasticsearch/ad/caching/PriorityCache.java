@@ -300,7 +300,7 @@ public class PriorityCache implements EntityCache {
                                 modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, state);
                             } else if (cause instanceof RejectedExecutionException
                                 || TransportActions.isShardNotAvailableException(cause)) {
-                                LOG.error("too many get AD model checkpoint requests or shard not avialble");
+                                LOG.error("too many get AD model checkpoint requests or shard not avialble", exception);
                                 cooldownStart = clock.instant();
                             } else {
                                 LOG.error("Fail to restore models for " + modelId, exception);
