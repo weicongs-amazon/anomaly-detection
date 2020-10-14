@@ -131,7 +131,9 @@ public class PriorityCache implements EntityCache {
         ModelState<EntityModel> modelState = buffer.get(modelId);
         try {
             // during maintenance period, stop putting new entries
-            if (modelState == null && maintenanceLock.tryLock() && cacheMissRateLimiter.tryAcquire()) {
+            if (modelState == null && maintenanceLock.tryLock()
+//                    && cacheMissRateLimiter.tryAcquire()
+            ) {
                 DoorKeeper doorKeeper = doorKeepers
                     .computeIfAbsent(
                         detectorId,
