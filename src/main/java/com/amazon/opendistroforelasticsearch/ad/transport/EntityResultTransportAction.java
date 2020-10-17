@@ -160,6 +160,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                 if (result.getRcfScore() > 0 && (!onlySaveAnomalies || result.getGrade() > 0)) {
                     currentBulkRequest
                         .add(
+
                             new AnomalyResult(
                                 detectorId,
                                 result.getRcfScore(),
