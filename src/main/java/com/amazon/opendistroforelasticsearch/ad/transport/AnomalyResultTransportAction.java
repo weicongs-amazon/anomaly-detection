@@ -286,6 +286,8 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                                 )
                             );
                     } else {
+                        LOG.info("Weicongs-Testing: heap percentage:{} after searching",
+                                adCircuitBreakerService.getJvmService().stats().getMem().getHeapUsedPercent());
                         entityFeatures
                             .entrySet()
                             .stream()

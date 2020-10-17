@@ -151,7 +151,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                 // result.getRcfScore() = 0 means the model is not initialized
                 // result.getGrade() = 0 means it is not an anomaly
                 // So many EsRejectedExecutionException if we write no matter what
-//                if (result.getRcfScore() > 0 && (!onlySaveAnomalies || result.getGrade() > 0)) {
+                if (result.getRcfScore() > 0 && (!onlySaveAnomalies || result.getGrade() > 0)) {
                     this.anomalyResultHandler
                         .write(
                             new AnomalyResult(
@@ -169,7 +169,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                             ),
                             currentBulkRequest
                         );
-//                }
+                }
             }
             LOG.info("Weicongs-Testing: AD results bulk size:{}", currentBulkRequest.getAnomalyResults().size());
             this.anomalyResultHandler.flush(currentBulkRequest, detectorId);

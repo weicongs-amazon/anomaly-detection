@@ -90,7 +90,10 @@ public class ADCircuitBreakerService {
                 return true;
             }
         }
-
         return false;
+    }
+
+    public JvmService getJvmService() {
+        return this.jvmService;
     }
 }
