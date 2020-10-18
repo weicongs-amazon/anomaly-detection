@@ -172,6 +172,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                 }
             }
             LOG.info("Weicongs-Testing: AD results bulk size:{}", currentBulkRequest.getAnomalyResults().size());
+            LOG.info("Weicongs-Testing: heap percentage:{} before flushing", adCircuitBreakerService.getJvmService().stats().getMem().getHeapUsedPercent());
             this.anomalyResultHandler.flush(currentBulkRequest, detectorId);
             // bulk all accumulated checkpoint requests
             this.checkpointDao.flush();

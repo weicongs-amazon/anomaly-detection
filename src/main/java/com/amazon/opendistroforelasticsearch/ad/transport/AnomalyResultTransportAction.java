@@ -320,6 +320,8 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                     listener.onResponse(new AnomalyResultResponse(0, 0, 0, new ArrayList<FeatureData>()));
                 }, exception -> handleFailure(exception, listener, adID));
 
+                LOG.info("Weicongs-Testing: heap percentage:{} before searching",
+                        adCircuitBreakerService.getJvmService().stats().getMem().getHeapUsedPercent());
                 threadPool
                     .executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME)
                     .execute(
