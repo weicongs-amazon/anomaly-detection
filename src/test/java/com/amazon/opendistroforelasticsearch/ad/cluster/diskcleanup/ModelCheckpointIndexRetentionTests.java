@@ -75,12 +75,13 @@ public class ModelCheckpointIndexRetentionTests extends AbstractADTest {
             ActionListener<Boolean> listener = (ActionListener<Boolean>) args[3];
             listener.onResponse(true);
             return null;
-        }).when(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50 * 1024 * 1024 * 1024L), any(), any());
+        }).when(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50L), any(), any());
 
         modelCheckpointIndexRetention.run();
-        verify(indexCleanup, times(2))
-            .deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50 * 1024 * 1024 * 1024L), any(), any());
         verify(indexCleanup).deleteDocsByQuery(eq(CommonName.CHECKPOINT_INDEX_NAME), any(), any());
+        verify(indexCleanup, times(2))
+            .deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50L), any(), any());
+
     }
 
     @SuppressWarnings("unchecked")
@@ -91,10 +92,11 @@ public class ModelCheckpointIndexRetentionTests extends AbstractADTest {
             ActionListener<Boolean> listener = (ActionListener<Boolean>) args[3];
             listener.onResponse(false);
             return null;
-        }).when(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50 * 1024 * 1024 * 1024L), any(), any());
+        }).when(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50L), any(), any());
 
         modelCheckpointIndexRetention.run();
-        verify(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50 * 1024 * 1024 * 1024L), any(), any());
         verify(indexCleanup).deleteDocsByQuery(eq(CommonName.CHECKPOINT_INDEX_NAME), any(), any());
+        verify(indexCleanup).deleteDocsBasedOnShardSize(eq(CommonName.CHECKPOINT_INDEX_NAME), eq(50L), any(), any());
+
     }
 }
