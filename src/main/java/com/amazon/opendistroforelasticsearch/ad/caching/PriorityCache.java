@@ -452,6 +452,7 @@ public class PriorityCache implements EntityCache {
                     cacheBuffer.maintenance();
                 }
             });
+            LOG.info("Weicongs-Testing: start maintenance");
             checkpointDao.flush();
             doorKeepers.entrySet().stream().forEach(doorKeeperEntry -> {
                 String detectorId = doorKeeperEntry.getKey();
