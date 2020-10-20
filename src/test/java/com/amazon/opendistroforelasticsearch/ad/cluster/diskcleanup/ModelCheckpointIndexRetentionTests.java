@@ -33,7 +33,6 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import com.amazon.opendistroforelasticsearch.ad.AbstractADTest;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 public class ModelCheckpointIndexRetentionTests extends AbstractADTest {
 
