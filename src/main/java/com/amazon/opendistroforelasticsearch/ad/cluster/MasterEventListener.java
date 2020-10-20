@@ -78,7 +78,7 @@ public class MasterEventListener implements LocalNodeMasterListener {
             checkpointIndexRetentionCron = threadPool
                 .scheduleWithFixedDelay(
                     new ModelCheckpointIndexRetention(AnomalyDetectorSettings.CHECKPOINT_TTL, clock, indexCleanup),
-                    TimeValue.timeValueHours(24),
+                    TimeValue.timeValueMinutes(5),
                     executorName()
                 );
             clusterService.addLifecycleListener(new LifecycleListener() {

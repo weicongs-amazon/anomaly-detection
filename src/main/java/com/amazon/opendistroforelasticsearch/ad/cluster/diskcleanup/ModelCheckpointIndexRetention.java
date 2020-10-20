@@ -42,7 +42,7 @@ public class ModelCheckpointIndexRetention implements Runnable {
     private static final Logger LOG = LogManager.getLogger(ModelCheckpointIndexRetention.class);
 
     // The recommended max shard size is 50G, we don't wanna our index exceeds this number
-    private static final long MAX_SHARD_SIZE_IN_BYTE = 50 * 1024 * 1024 * 1024L;
+    private static final long MAX_SHARD_SIZE_IN_BYTE = 50L;
     // We can't clean up all of the checkpoints. At least keep models for 1 day
     private static final Duration MINIMUM_CHECKPOINT_TTL = Duration.ofDays(1);
 
@@ -58,6 +58,7 @@ public class ModelCheckpointIndexRetention implements Runnable {
 
     @Override
     public void run() {
+        LOG.info("Weicongs-Testing: checkpoint index retention start");
         indexCleanup
             .deleteDocsByQuery(
                 CommonName.CHECKPOINT_INDEX_NAME,
@@ -79,6 +80,7 @@ public class ModelCheckpointIndexRetention implements Runnable {
     }
 
     private void cleanupBasedOnShardSize(Duration cleanUpTtl) {
+        LOG.info("Weicongs-Testing: cleanup based on shard size, cleanup ttl:{} days", cleanUpTtl.toDays());
         indexCleanup
             .deleteDocsBasedOnShardSize(
                 CommonName.CHECKPOINT_INDEX_NAME,
