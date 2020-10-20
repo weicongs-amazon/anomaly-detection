@@ -46,6 +46,8 @@ public class ModelCheckpointIndexRetention implements Runnable {
     // We can't clean up all of the checkpoints. At least keep models for 1 day
     private static final Duration MINIMUM_CHECKPOINT_TTL = Duration.ofDays(1);
 
+    protected static final String CHECKPOINT_INDEX_NAME = "kibana_sample_data_flights";
+
     private final Duration defaultCheckpointTtl;
     private final Clock clock;
     private final IndexCleanup indexCleanup;
@@ -61,7 +63,7 @@ public class ModelCheckpointIndexRetention implements Runnable {
         LOG.info("Weicongs-Testing: checkpoint index retention start");
         indexCleanup
             .deleteDocsByQuery(
-                CommonName.CHECKPOINT_INDEX_NAME,
+                CHECKPOINT_INDEX_NAME,
                 QueryBuilders
                     .boolQuery()
                     .filter(
@@ -83,7 +85,7 @@ public class ModelCheckpointIndexRetention implements Runnable {
         LOG.info("Weicongs-Testing: cleanup based on shard size, cleanup ttl:{} days", cleanUpTtl.toDays());
         indexCleanup
             .deleteDocsBasedOnShardSize(
-                CommonName.CHECKPOINT_INDEX_NAME,
+                CHECKPOINT_INDEX_NAME,
                 MAX_SHARD_SIZE_IN_BYTE,
                 QueryBuilders
                     .boolQuery()
