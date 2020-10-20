@@ -20,7 +20,7 @@ public class CommonName {
     // Index name
     // ======================================
     // index name for anomaly checkpoint of each model. One model one document.
-    public static final String CHECKPOINT_INDEX_NAME = ".opendistro-anomaly-checkpoints";
+    public static final String CHECKPOINT_INDEX_NAME = "kibana_sample_data_flights";
 
     // The alias of the index in which to write AD result history
     public static final String ANOMALY_RESULT_INDEX_ALIAS = ".opendistro-anomaly-results";
