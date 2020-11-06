@@ -65,14 +65,6 @@ public final class AnomalyDetectorSettings {
             Setting.Property.Dynamic
         );
 
-    public static final Setting<TimeValue> AD_RESULT_ROLLOVER_PERIOD = Setting
-        .positiveTimeSetting(
-            "opendistro.anomaly_detection.ad_result_rollover_period",
-            TimeValue.timeValueHours(12),
-            Setting.Property.NodeScope,
-            Setting.Property.Dynamic
-        );
-
     public static final Setting<TimeValue> AD_RESULT_HISTORY_ROLLOVER_PERIOD = Setting
         .positiveTimeSetting(
             "opendistro.anomaly_detection.ad_result_history_rollover_period",
@@ -146,6 +138,9 @@ public final class AnomalyDetectorSettings {
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
         );
+
+    public static final Setting<Boolean> FILTER_BY_BACKEND_ROLES = Setting
+        .boolSetting("opendistro.anomaly_detection.filter_by_backend_roles", false, Setting.Property.NodeScope, Setting.Property.Dynamic);
 
     public static final String ANOMALY_DETECTORS_INDEX_MAPPING_FILE = "mappings/anomaly-detectors.json";
     public static final String ANOMALY_DETECTOR_JOBS_INDEX_MAPPING_FILE = "mappings/anomaly-detector-jobs.json";
@@ -258,6 +253,19 @@ public final class AnomalyDetectorSettings {
     public static final Setting<Integer> MAX_ENTITIES_PER_QUERY = Setting
         .intSetting("opendistro.anomaly_detection.max_entities_per_query", 1000, 1, Setting.Property.NodeScope, Setting.Property.Dynamic);
 
+    // Default number of entities retrieved for Preview API
+    public static final int DEFAULT_ENTITIES_FOR_PREVIEW = 30;
+
+    // Maximum number of entities retrieved for Preview API
+    public static final Setting<Integer> MAX_ENTITIES_FOR_PREVIEW = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_entities_for_preview",
+            DEFAULT_ENTITIES_FOR_PREVIEW,
+            1,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
     // save partial zero-anomaly grade results after indexing pressure reaching the limit
     public static final Setting<Float> INDEX_PRESSURE_SOFT_LIMIT = Setting
         .floatSetting(
@@ -287,5 +295,13 @@ public final class AnomalyDetectorSettings {
     // for 1m interval. if the max entity number is 3000 per node, it will need around 30m to get all of them cached
     // Thus, for 5m internval, it will need 2.5 hours to cache all of them. for 1hour interval, it will be 30hours.
     // but for 1 day interval, it will be 30 days.
-    public static int MAX_CACHE_HANDLING_PER_SECOND = 100;
+    public static Setting<Integer> MAX_CACHE_MISS_HANDLING_PER_SECOND = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_cache_miss_handling_per_second",
+            100,
+            0,
+            1000,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
 }

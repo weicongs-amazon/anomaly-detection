@@ -122,10 +122,12 @@ import org.powermock.modules.junit4.PowerMockRunnerDelegate;
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
 import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.Interpolator;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.LinearUniformInterpolator;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.SingleFeatureLinearUniformInterpolator;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.Feature;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
@@ -209,7 +211,12 @@ public class SearchFeatureDaoTests {
         Settings settings = Settings.EMPTY;
         ClusterSettings clusterSettings = new ClusterSettings(
             Settings.EMPTY,
-            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY)))
+            Collections
+                .unmodifiableSet(
+                    new HashSet<>(
+                        Arrays.asList(AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY, AnomalyDetectorSettings.MAX_ENTITIES_FOR_PREVIEW)
+                    )
+                )
         );
         when(clusterService.getClusterSettings()).thenReturn(clusterSettings);
 
@@ -230,7 +237,7 @@ public class SearchFeatureDaoTests {
         aggsMap = new HashMap<>();
         // aggsList = new ArrayList<>();
 
-        when(max.getName()).thenReturn(SearchFeatureDao.AGG_NAME_MAX);
+        when(max.getName()).thenReturn(CommonName.AGG_NAME_MAX);
         List<Aggregation> list = new ArrayList<>();
         list.add(max);
         Aggregations aggregations = new Aggregations(list);
@@ -269,12 +276,12 @@ public class SearchFeatureDaoTests {
     public void test_getLatestDataTime_returnExpectedTime_givenData() {
         // pre-conditions
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
-            .aggregation(AggregationBuilders.max(SearchFeatureDao.AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .size(0);
         searchRequest.source(searchSourceBuilder);
 
         long epochTime = 100L;
-        aggsMap.put(SearchFeatureDao.AGG_NAME_MAX, max);
+        aggsMap.put(CommonName.AGG_NAME_MAX, max);
         when(max.getValue()).thenReturn((double) epochTime);
 
         // test
@@ -288,7 +295,7 @@ public class SearchFeatureDaoTests {
     public void test_getLatestDataTime_returnEmpty_givenNoData() {
         // pre-conditions
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
-            .aggregation(AggregationBuilders.max(SearchFeatureDao.AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .size(0);
         searchRequest.source(searchSourceBuilder);
 
@@ -305,11 +312,11 @@ public class SearchFeatureDaoTests {
     @SuppressWarnings("unchecked")
     public void getLatestDataTime_returnExpectedToListener() {
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
-            .aggregation(AggregationBuilders.max(SearchFeatureDao.AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .size(0);
         searchRequest.source(searchSourceBuilder);
         long epochTime = 100L;
-        aggsMap.put(SearchFeatureDao.AGG_NAME_MAX, max);
+        aggsMap.put(CommonName.AGG_NAME_MAX, max);
         when(max.getValue()).thenReturn((double) epochTime);
         doAnswer(invocation -> {
             ActionListener<SearchResponse> listener = invocation.getArgument(1);
@@ -317,6 +324,7 @@ public class SearchFeatureDaoTests {
             return null;
         }).when(client).search(eq(searchRequest), any(ActionListener.class));
 
+        when(ParseUtils.getLatestDataTime(eq(searchResponse))).thenReturn(Optional.of(epochTime));
         ActionListener<Optional<Long>> listener = mock(ActionListener.class);
         searchFeatureDao.getLatestDataTime(detector, listener);
 
@@ -923,5 +931,88 @@ public class SearchFeatureDaoTests {
         Entry<Optional<Long>, Optional<Long>> result = captor.getValue();
         assertEquals((long) earliest, result.getKey().get().longValue());
         assertEquals((long) latest, result.getValue().get().longValue());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testGetHighestCountEntities() {
+        SearchHits hits = new SearchHits(new SearchHit[] {}, null, Float.NaN);
+
+        String entity1Name = "value1";
+        long entity1Count = 3;
+        StringTerms.Bucket entity1Bucket = new StringTerms.Bucket(
+            new BytesRef(entity1Name.getBytes(StandardCharsets.UTF_8), 0, entity1Name.getBytes(StandardCharsets.UTF_8).length),
+            entity1Count,
+            null,
+            false,
+            0,
+            DocValueFormat.RAW
+        );
+        String entity2Name = "value2";
+        long entity2Count = 1;
+        StringTerms.Bucket entity2Bucket = new StringTerms.Bucket(
+            new BytesRef(entity2Name.getBytes(StandardCharsets.UTF_8), 0, entity2Name.getBytes(StandardCharsets.UTF_8).length),
+            entity2Count,
+            null,
+            false,
+            0,
+            DocValueFormat.RAW
+        );
+        List<StringTerms.Bucket> stringBuckets = ImmutableList.of(entity1Bucket, entity2Bucket);
+        StringTerms termsAgg = new StringTerms(
+            "term_agg",
+            BucketOrder.count(false),
+            1,
+            0,
+            Collections.emptyMap(),
+            DocValueFormat.RAW,
+            1,
+            false,
+            0,
+            stringBuckets,
+            0
+        );
+
+        InternalAggregations internalAggregations = InternalAggregations.from(Collections.singletonList(termsAgg));
+
+        SearchResponseSections searchSections = new SearchResponseSections(hits, internalAggregations, null, false, false, null, 1);
+
+        SearchResponse searchResponse = new SearchResponse(
+            searchSections,
+            null,
+            1,
+            1,
+            0,
+            30,
+            ShardSearchFailure.EMPTY_ARRAY,
+            SearchResponse.Clusters.EMPTY
+        );
+
+        doAnswer(invocation -> {
+            SearchRequest request = invocation.getArgument(0);
+            assertEquals(1, request.indices().length);
+            assertTrue(detector.getIndices().contains(request.indices()[0]));
+            AggregatorFactories.Builder aggs = request.source().aggregations();
+            assertEquals(1, aggs.count());
+            Collection<AggregationBuilder> factory = aggs.getAggregatorFactories();
+            assertTrue(!factory.isEmpty());
+            assertThat(factory.iterator().next(), instanceOf(TermsAggregationBuilder.class));
+
+            ActionListener<SearchResponse> listener = invocation.getArgument(1);
+            listener.onResponse(searchResponse);
+            return null;
+        }).when(client).search(any(SearchRequest.class), any(ActionListener.class));
+
+        when(detector.getCategoryField()).thenReturn(Collections.singletonList("fieldName"));
+        ActionListener<List<Entity>> listener = mock(ActionListener.class);
+
+        searchFeatureDao.getHighestCountEntities(detector, 10L, 20L, listener);
+
+        ArgumentCaptor<List<Entity>> captor = ArgumentCaptor.forClass(List.class);
+        verify(listener).onResponse(captor.capture());
+        List<Entity> result = captor.getValue();
+        assertEquals(2, result.size());
+        assertEquals(entity1Name, result.get(0).getValue());
+        assertEquals(entity2Name, result.get(1).getValue());
     }
 }

@@ -20,7 +20,6 @@ import static java.util.Collections.unmodifiableList;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -30,6 +29,8 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionResponse;
@@ -37,7 +38,6 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.inject.Module;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.IndexScopedSettings;
@@ -95,6 +95,7 @@ import com.amazon.opendistroforelasticsearch.ad.rest.RestExecuteAnomalyDetectorA
 import com.amazon.opendistroforelasticsearch.ad.rest.RestGetAnomalyDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.rest.RestIndexAnomalyDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.rest.RestSearchAnomalyDetectorAction;
+import com.amazon.opendistroforelasticsearch.ad.rest.RestSearchAnomalyDetectorInfoAction;
 import com.amazon.opendistroforelasticsearch.ad.rest.RestSearchAnomalyResultAction;
 import com.amazon.opendistroforelasticsearch.ad.rest.RestStatsAnomalyDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
@@ -120,6 +121,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.DeleteAnomalyDetectorA
 import com.amazon.opendistroforelasticsearch.ad.transport.DeleteAnomalyDetectorTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.DeleteModelAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.DeleteModelTransportAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.EntityProfileAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.EntityProfileTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.EntityResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.EntityResultTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.GetAnomalyDetectorAction;
@@ -133,6 +136,8 @@ import com.amazon.opendistroforelasticsearch.ad.transport.RCFPollingTransportAct
 import com.amazon.opendistroforelasticsearch.ad.transport.RCFResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.RCFResultTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyDetectorAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyDetectorInfoAction;
+import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyDetectorInfoTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyDetectorTransportAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyResultAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.SearchAnomalyResultTransportAction;
@@ -162,6 +167,8 @@ import com.google.gson.Gson;
  * Entry point of AD plugin.
  */
 public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, ScriptPlugin, JobSchedulerExtension, SystemIndexPlugin {
+
+    private static final Logger LOG = LogManager.getLogger(AnomalyDetectorPlugin.class);
 
     public static final String AD_BASE_URI = "/_opendistro/_anomaly_detection";
     public static final String AD_BASE_DETECTORS_URI = AD_BASE_URI + "/detectors";
@@ -217,13 +224,10 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         jobRunner.setAnomalyResultHandler(anomalyResultHandler);
         jobRunner.setDetectionStateHandler(detectorStateHandler);
         jobRunner.setSettings(settings);
+        jobRunner.setIndexUtil(anomalyDetectionIndices);
 
         RestGetAnomalyDetectorAction restGetAnomalyDetectorAction = new RestGetAnomalyDetectorAction();
-        RestIndexAnomalyDetectorAction restIndexAnomalyDetectorAction = new RestIndexAnomalyDetectorAction(
-            settings,
-            clusterService,
-            anomalyDetectionIndices
-        );
+        RestIndexAnomalyDetectorAction restIndexAnomalyDetectorAction = new RestIndexAnomalyDetectorAction(settings, clusterService);
         RestSearchAnomalyDetectorAction searchAnomalyDetectorAction = new RestSearchAnomalyDetectorAction();
         RestSearchAnomalyResultAction searchAnomalyResultAction = new RestSearchAnomalyResultAction();
         RestDeleteAnomalyDetectorAction deleteAnomalyDetectorAction = new RestDeleteAnomalyDetectorAction();
@@ -234,6 +238,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         );
         RestStatsAnomalyDetectorAction statsAnomalyDetectorAction = new RestStatsAnomalyDetectorAction(adStats, this.nodeFilter);
         RestAnomalyDetectorJobAction anomalyDetectorJobAction = new RestAnomalyDetectorJobAction(settings, clusterService);
+        RestSearchAnomalyDetectorInfoAction searchAnomalyDetectorInfoAction = new RestSearchAnomalyDetectorInfoAction();
 
         return ImmutableList
             .of(
@@ -244,7 +249,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 deleteAnomalyDetectorAction,
                 executeAnomalyDetectorAction,
                 anomalyDetectorJobAction,
-                statsAnomalyDetectorAction
+                statsAnomalyDetectorAction,
+                searchAnomalyDetectorInfoAction
             );
     }
 
@@ -416,7 +422,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             AnomalyDetectorSettings.NUM_MIN_SAMPLES,
             settings,
             threadPool,
-            AnomalyDetectorSettings.MAX_CACHE_HANDLING_PER_SECOND
+            AnomalyDetectorSettings.MAX_CACHE_MISS_HANDLING_PER_SECOND.get(settings)
         );
 
         CacheProvider cacheProvider = new CacheProvider(cache);
@@ -429,7 +435,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             .<String, ADStat<?>>builder()
             .put(StatNames.AD_EXECUTE_REQUEST_COUNT.getName(), new ADStat<>(false, new CounterSupplier()))
             .put(StatNames.AD_EXECUTE_FAIL_COUNT.getName(), new ADStat<>(false, new CounterSupplier()))
-            .put(StatNames.MODEL_INFORMATION.getName(), new ADStat<>(false, new ModelsOnNodeSupplier(modelManager)))
+            .put(StatNames.MODEL_INFORMATION.getName(), new ADStat<>(false, new ModelsOnNodeSupplier(modelManager, cacheProvider)))
             .put(
                 StatNames.ANOMALY_DETECTORS_INDEX_STATUS.getName(),
                 new ADStat<>(true, new IndexStatusSupplier(indexUtils, AnomalyDetector.ANOMALY_DETECTORS_INDEX))
@@ -441,6 +447,14 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             .put(
                 StatNames.MODELS_CHECKPOINT_INDEX_STATUS.getName(),
                 new ADStat<>(true, new IndexStatusSupplier(indexUtils, CommonName.CHECKPOINT_INDEX_NAME))
+            )
+            .put(
+                StatNames.ANOMALY_DETECTION_JOB_INDEX_STATUS.getName(),
+                new ADStat<>(true, new IndexStatusSupplier(indexUtils, AnomalyDetectorJob.ANOMALY_DETECTOR_JOB_INDEX))
+            )
+            .put(
+                StatNames.ANOMALY_DETECTION_STATE_STATUS.getName(),
+                new ADStat<>(true, new IndexStatusSupplier(indexUtils, DetectorInternalState.DETECTOR_STATE_INDEX))
             )
             .put(StatNames.DETECTOR_COUNT.getName(), new ADStat<>(true, new SettableSupplier()))
             .build();
@@ -468,8 +482,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             this.clientUtil,
             this.indexUtils,
             clusterService,
-            stateManager,
-            getClock()
+            stateManager
         );
 
         // return objects used by Guice to inject dependencies for e.g.,
@@ -510,14 +523,6 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
     }
 
     @Override
-    public Collection<Module> createGuiceModules() {
-        List<Module> modules = new ArrayList<>();
-        modules.add(b -> b.bind(Clock.class).toInstance(getClock()));
-
-        return modules;
-    }
-
-    @Override
     public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
         return Collections
             .singletonList(
@@ -545,7 +550,6 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.DETECTION_WINDOW_DELAY,
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD,
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS,
-                AnomalyDetectorSettings.AD_RESULT_ROLLOVER_PERIOD,
                 AnomalyDetectorSettings.MAX_RETRY_FOR_UNRESPONSIVE_NODE,
                 AnomalyDetectorSettings.COOLDOWN_MINUTES,
                 AnomalyDetectorSettings.BACKOFF_MINUTES,
@@ -554,8 +558,11 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD,
                 AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE,
                 AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY,
+                AnomalyDetectorSettings.MAX_ENTITIES_FOR_PREVIEW,
                 AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT,
-                AnomalyDetectorSettings.MAX_PRIMARY_SHARDS
+                AnomalyDetectorSettings.MAX_PRIMARY_SHARDS,
+                AnomalyDetectorSettings.FILTER_BY_BACKEND_ROLES,
+                AnomalyDetectorSettings.MAX_CACHE_MISS_HANDLING_PER_SECOND
             );
         return unmodifiableList(Stream.concat(enabledSetting.stream(), systemSetting.stream()).collect(Collectors.toList()));
     }
@@ -595,7 +602,9 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 new ActionHandler<>(IndexAnomalyDetectorAction.INSTANCE, IndexAnomalyDetectorTransportAction.class),
                 new ActionHandler<>(AnomalyDetectorJobAction.INSTANCE, AnomalyDetectorJobTransportAction.class),
                 new ActionHandler<>(ADResultBulkAction.INSTANCE, ADResultBulkTransportAction.class),
-                new ActionHandler<>(EntityResultAction.INSTANCE, EntityResultTransportAction.class)
+                new ActionHandler<>(EntityResultAction.INSTANCE, EntityResultTransportAction.class),
+                new ActionHandler<>(EntityProfileAction.INSTANCE, EntityProfileTransportAction.class),
+                new ActionHandler<>(SearchAnomalyDetectorInfoAction.INSTANCE, SearchAnomalyDetectorInfoTransportAction.class)
             );
     }
 

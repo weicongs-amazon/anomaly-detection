@@ -21,6 +21,7 @@ import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.PRO
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
 
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -39,19 +40,21 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.common.CheckedConsumer;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.rest.BytesRestResponse;
-import org.elasticsearch.rest.RestResponse;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.transport.TransportService;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorProfileRunner;
+import com.amazon.opendistroforelasticsearch.ad.EntityProfileRunner;
+import com.amazon.opendistroforelasticsearch.ad.Name;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfile;
-import com.amazon.opendistroforelasticsearch.ad.model.ProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.EntityProfileName;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 import com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils;
@@ -62,11 +65,15 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
     private static final Logger LOG = LogManager.getLogger(GetAnomalyDetectorTransportAction.class);
 
     private final Client client;
-    private final AnomalyDetectorProfileRunner profileRunner;
+
     private final Set<String> allProfileTypeStrs;
-    private final Set<ProfileName> allProfileTypes;
-    private final Set<ProfileName> defaultProfileTypes;
+    private final Set<DetectorProfileName> allProfileTypes;
+    private final Set<DetectorProfileName> defaultDetectorProfileTypes;
+    private final Set<String> allEntityProfileTypeStrs;
+    private final Set<EntityProfileName> allEntityProfileTypes;
+    private final Set<EntityProfileName> defaultEntityProfileTypes;
     private final NamedXContentRegistry xContentRegistry;
+    private final DiscoveryNodeFilterer nodeFilter;
 
     @Inject
     public GetAnomalyDetectorTransportAction(
@@ -78,19 +85,21 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
     ) {
         super(GetAnomalyDetectorAction.NAME, transportService, actionFilters, GetAnomalyDetectorRequest::new);
         this.client = client;
-        List<ProfileName> allProfiles = Arrays.asList(ProfileName.values());
-        this.allProfileTypes = new HashSet<ProfileName>(allProfiles);
-        this.allProfileTypeStrs = getProfileListStrs(allProfiles);
 
-        List<ProfileName> defaultProfiles = Arrays.asList(ProfileName.ERROR, ProfileName.STATE);
-        this.defaultProfileTypes = new HashSet<ProfileName>(defaultProfiles);
+        List<DetectorProfileName> allProfiles = Arrays.asList(DetectorProfileName.values());
+        this.allProfileTypes = EnumSet.copyOf(allProfiles);
+        this.allProfileTypeStrs = getProfileListStrs(allProfiles);
+        List<DetectorProfileName> defaultProfiles = Arrays.asList(DetectorProfileName.ERROR, DetectorProfileName.STATE);
+        this.defaultDetectorProfileTypes = new HashSet<DetectorProfileName>(defaultProfiles);
+
+        List<EntityProfileName> allEntityProfiles = Arrays.asList(EntityProfileName.values());
+        this.allEntityProfileTypes = EnumSet.copyOf(allEntityProfiles);
+        this.allEntityProfileTypeStrs = getProfileListStrs(allEntityProfiles);
+        List<EntityProfileName> defaultEntityProfiles = Arrays.asList(EntityProfileName.STATE);
+        this.defaultEntityProfileTypes = new HashSet<EntityProfileName>(defaultEntityProfiles);
+
         this.xContentRegistry = xContentRegistry;
-        this.profileRunner = new AnomalyDetectorProfileRunner(
-            client,
-            xContentRegistry,
-            nodeFilter,
-            AnomalyDetectorSettings.NUM_MIN_SAMPLES
-        );
+        this.nodeFilter = nodeFilter;
     }
 
     @Override
@@ -99,19 +108,57 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
         Long version = request.getVersion();
         String typesStr = request.getTypeStr();
         String rawPath = request.getRawPath();
+        String entityValue = request.getEntityValue();
         boolean all = request.isAll();
         boolean returnJob = request.isReturnJob();
 
-        if (!Strings.isEmpty(typesStr) || rawPath.endsWith(PROFILE) || rawPath.endsWith(PROFILE + "/")) {
-            profileRunner.profile(detectorID, getProfileActionListener(listener, detectorID), getProfilesToCollect(typesStr, all));
-        } else {
-            MultiGetRequest.Item adItem = new MultiGetRequest.Item(ANOMALY_DETECTORS_INDEX, detectorID).version(version);
-            MultiGetRequest multiGetRequest = new MultiGetRequest().add(adItem);
-            if (returnJob) {
-                MultiGetRequest.Item adJobItem = new MultiGetRequest.Item(ANOMALY_DETECTOR_JOB_INDEX, detectorID).version(version);
-                multiGetRequest.add(adJobItem);
+        try (ThreadContext.StoredContext context = client.threadPool().getThreadContext().stashContext()) {
+            if (!Strings.isEmpty(typesStr) || rawPath.endsWith(PROFILE) || rawPath.endsWith(PROFILE + "/")) {
+                if (entityValue != null) {
+                    Set<EntityProfileName> entityProfilesToCollect = getEntityProfilesToCollect(typesStr, all);
+                    EntityProfileRunner profileRunner = new EntityProfileRunner(
+                        client,
+                        xContentRegistry,
+                        AnomalyDetectorSettings.NUM_MIN_SAMPLES
+                    );
+                    profileRunner
+                        .profile(
+                            detectorID,
+                            entityValue,
+                            entityProfilesToCollect,
+                            ActionListener
+                                .wrap(
+                                    profile -> {
+                                        listener
+                                            .onResponse(
+                                                new GetAnomalyDetectorResponse(0, null, 0, 0, null, null, false, null, null, profile, true)
+                                            );
+                                    },
+                                    e -> listener.onFailure(e)
+                                )
+                        );
+                } else {
+                    Set<DetectorProfileName> profilesToCollect = getProfilesToCollect(typesStr, all);
+                    AnomalyDetectorProfileRunner profileRunner = new AnomalyDetectorProfileRunner(
+                        client,
+                        xContentRegistry,
+                        nodeFilter,
+                        AnomalyDetectorSettings.NUM_MIN_SAMPLES
+                    );
+                    profileRunner.profile(detectorID, getProfileActionListener(listener, detectorID), profilesToCollect);
+                }
+            } else {
+                MultiGetRequest.Item adItem = new MultiGetRequest.Item(ANOMALY_DETECTORS_INDEX, detectorID).version(version);
+                MultiGetRequest multiGetRequest = new MultiGetRequest().add(adItem);
+                if (returnJob) {
+                    MultiGetRequest.Item adJobItem = new MultiGetRequest.Item(ANOMALY_DETECTOR_JOB_INDEX, detectorID).version(version);
+                    multiGetRequest.add(adJobItem);
+                }
+                client.multiGet(multiGetRequest, onMultiGetResponse(listener, returnJob, detectorID));
             }
-            client.multiGet(multiGetRequest, onMultiGetResponse(listener, returnJob, detectorID));
+        } catch (Exception e) {
+            LOG.error(e);
+            listener.onFailure(e);
         }
     }
 
@@ -138,6 +185,7 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
                                 .onFailure(
                                     new ElasticsearchStatusException("Can't find detector with id:  " + detectorId, RestStatus.NOT_FOUND)
                                 );
+                            return;
                         }
                         id = response.getId();
                         version = response.getResponse().getVersion();
@@ -152,7 +200,8 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
                                 detector = parser.namedObject(AnomalyDetector.class, AnomalyDetector.PARSE_FIELD_NAME, null);
                             } catch (Exception e) {
                                 String message = "Failed to parse detector job " + detectorId;
-                                LOG.error(message, e);
+                                listener.onFailure(buildInternalServerErrorResponse(e, message));
+                                return;
                             }
                         }
                     }
@@ -169,7 +218,8 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
                                 adJob = AnomalyDetectorJob.parse(parser);
                             } catch (Exception e) {
                                 String message = "Failed to parse detector job " + detectorId;
-                                LOG.error(message, e);
+                                listener.onFailure(buildInternalServerErrorResponse(e, message));
+                                return;
                             }
                         }
                     }
@@ -185,6 +235,7 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
                             adJob,
                             returnJob,
                             RestStatus.OK,
+                            null,
                             null,
                             false
                         )
@@ -205,28 +256,53 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
         return ActionListener.wrap(new CheckedConsumer<DetectorProfile, Exception>() {
             @Override
             public void accept(DetectorProfile profile) throws Exception {
-                listener.onResponse(new GetAnomalyDetectorResponse(0, null, 0, 0, null, null, false, null, profile, true));
+                listener.onResponse(new GetAnomalyDetectorResponse(0, null, 0, 0, null, null, false, null, profile, null, true));
             }
         }, exception -> { listener.onFailure(exception); });
     }
 
-    private RestResponse buildInternalServerErrorResponse(Exception e, String errorMsg) {
+    private ElasticsearchStatusException buildInternalServerErrorResponse(Exception e, String errorMsg) {
         LOG.error(errorMsg, e);
-        return new BytesRestResponse(RestStatus.INTERNAL_SERVER_ERROR, errorMsg);
+        return new ElasticsearchStatusException(errorMsg, RestStatus.INTERNAL_SERVER_ERROR);
     }
 
-    private Set<ProfileName> getProfilesToCollect(String typesStr, boolean all) {
+    /**
+    *
+    * @param typesStr a list of input profile types separated by comma
+    * @param all whether we should return all profile in the response
+    * @return profiles to collect for a detector
+    */
+    private Set<DetectorProfileName> getProfilesToCollect(String typesStr, boolean all) {
         if (all) {
             return this.allProfileTypes;
         } else if (Strings.isEmpty(typesStr)) {
-            return this.defaultProfileTypes;
+            return this.defaultDetectorProfileTypes;
         } else {
+            // Filter out unsupported types
             Set<String> typesInRequest = new HashSet<>(Arrays.asList(typesStr.split(",")));
-            return ProfileName.getNames(Sets.intersection(this.allProfileTypeStrs, typesInRequest));
+            return DetectorProfileName.getNames(Sets.intersection(allProfileTypeStrs, typesInRequest));
         }
     }
 
-    private Set<String> getProfileListStrs(List<ProfileName> profileList) {
+    /**
+     *
+     * @param typesStr a list of input profile types separated by comma
+     * @param all whether we should return all profile in the response
+     * @return profiles to collect for an entity
+     */
+    private Set<EntityProfileName> getEntityProfilesToCollect(String typesStr, boolean all) {
+        if (all) {
+            return this.allEntityProfileTypes;
+        } else if (Strings.isEmpty(typesStr)) {
+            return this.defaultEntityProfileTypes;
+        } else {
+            // Filter out unsupported types
+            Set<String> typesInRequest = new HashSet<>(Arrays.asList(typesStr.split(",")));
+            return EntityProfileName.getNames(Sets.intersection(allEntityProfileTypeStrs, typesInRequest));
+        }
+    }
+
+    private Set<String> getProfileListStrs(List<? extends Name> profileList) {
         return profileList.stream().map(profile -> profile.getName()).collect(Collectors.toSet());
     }
 }

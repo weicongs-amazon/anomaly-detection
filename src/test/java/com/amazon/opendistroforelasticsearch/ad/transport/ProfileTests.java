@@ -45,8 +45,9 @@ import org.junit.Test;
 import test.com.amazon.opendistroforelasticsearch.ad.util.JsonDeserializer;
 
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
 import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
-import com.amazon.opendistroforelasticsearch.ad.model.ProfileName;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 
@@ -114,9 +115,9 @@ public class ProfileTests extends ESTestCase {
     @Test
     public void testProfileNodeRequest() throws IOException {
 
-        Set<ProfileName> profilesToRetrieve = new HashSet<ProfileName>();
-        profilesToRetrieve.add(ProfileName.COORDINATING_NODE);
-        ProfileRequest ProfileRequest = new ProfileRequest(detectorId, profilesToRetrieve);
+        Set<DetectorProfileName> profilesToRetrieve = new HashSet<DetectorProfileName>();
+        profilesToRetrieve.add(DetectorProfileName.COORDINATING_NODE);
+        ProfileRequest ProfileRequest = new ProfileRequest(detectorId, profilesToRetrieve, false);
         ProfileNodeRequest ProfileNodeRequest = new ProfileNodeRequest(ProfileRequest);
         assertEquals("ProfileNodeRequest has the wrong detector id", ProfileNodeRequest.getDetectorId(), detectorId);
         assertEquals("ProfileNodeRequest has the wrong ProfileRequest", ProfileNodeRequest.getProfilesToBeRetrieved(), profilesToRetrieve);
@@ -135,7 +136,7 @@ public class ProfileTests extends ESTestCase {
     public void testProfileNodeResponse() throws IOException, JsonPathNotFoundException {
 
         // Test serialization
-        ProfileNodeResponse profileNodeResponse = new ProfileNodeResponse(discoveryNode1, modelSizeMap1, shingleSize);
+        ProfileNodeResponse profileNodeResponse = new ProfileNodeResponse(discoveryNode1, modelSizeMap1, shingleSize, 0, 0);
         BytesStreamOutput output = new BytesStreamOutput();
         profileNodeResponse.writeTo(output);
         StreamInput streamInput = output.bytes().streamInput();
@@ -156,19 +157,15 @@ public class ProfileTests extends ESTestCase {
             );
         }
 
-        assertEquals(
-            "toXContent has the wrong shingle size",
-            JsonDeserializer.getIntValue(json, ProfileNodeResponse.SHINGLE_SIZE),
-            shingleSize
-        );
+        assertEquals("toXContent has the wrong shingle size", JsonDeserializer.getIntValue(json, CommonName.SHINGLE_SIZE), shingleSize);
     }
 
     @Test
     public void testProfileRequest() throws IOException {
         String detectorId = "123";
-        Set<ProfileName> profilesToRetrieve = new HashSet<ProfileName>();
-        profilesToRetrieve.add(ProfileName.COORDINATING_NODE);
-        ProfileRequest profileRequest = new ProfileRequest(detectorId, profilesToRetrieve);
+        Set<DetectorProfileName> profilesToRetrieve = new HashSet<DetectorProfileName>();
+        profilesToRetrieve.add(DetectorProfileName.COORDINATING_NODE);
+        ProfileRequest profileRequest = new ProfileRequest(detectorId, profilesToRetrieve, false);
 
         // Test Serialization
         BytesStreamOutput output = new BytesStreamOutput();
@@ -186,8 +183,8 @@ public class ProfileTests extends ESTestCase {
     @Test
     public void testProfileResponse() throws IOException, JsonPathNotFoundException {
 
-        ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(discoveryNode1, modelSizeMap1, shingleSize);
-        ProfileNodeResponse profileNodeResponse2 = new ProfileNodeResponse(discoveryNode2, modelSizeMap2, -1);
+        ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(discoveryNode1, modelSizeMap1, shingleSize, 0, 0);
+        ProfileNodeResponse profileNodeResponse2 = new ProfileNodeResponse(discoveryNode2, modelSizeMap2, -1, 0, 0);
         List<ProfileNodeResponse> profileNodeResponses = Arrays.asList(profileNodeResponse1, profileNodeResponse2);
         List<FailedNodeException> failures = Collections.emptyList();
         ProfileResponse profileResponse = new ProfileResponse(new ClusterName(clusterName), profileNodeResponses, failures);

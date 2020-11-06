@@ -18,7 +18,6 @@ package com.amazon.opendistroforelasticsearch.ad.transport;
 import java.io.IOException;
 
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.get.MultiGetResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -61,14 +60,21 @@ public class GetAnomalyDetectorTransportActionTests extends ESIntegTestCase {
 
     @Test
     public void testGetTransportAction() throws IOException {
-        MultiGetResponse mockResponse = Mockito.mock(MultiGetResponse.class);
-        GetAnomalyDetectorRequest getAnomalyDetectorRequest = new GetAnomalyDetectorRequest("1234", 4321, false, "nonempty", "", false);
+        GetAnomalyDetectorRequest getAnomalyDetectorRequest = new GetAnomalyDetectorRequest(
+            "1234",
+            4321,
+            false,
+            "nonempty",
+            "",
+            false,
+            null
+        );
         action.doExecute(task, getAnomalyDetectorRequest, response);
     }
 
     @Test
     public void testGetTransportActionWithReturnJob() throws IOException {
-        GetAnomalyDetectorRequest getAnomalyDetectorRequest = new GetAnomalyDetectorRequest("1234", 4321, true, "", "abcd", false);
+        GetAnomalyDetectorRequest getAnomalyDetectorRequest = new GetAnomalyDetectorRequest("1234", 4321, true, "", "abcd", false, null);
         action.doExecute(task, getAnomalyDetectorRequest, response);
     }
 

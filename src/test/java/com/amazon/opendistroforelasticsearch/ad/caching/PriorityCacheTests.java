@@ -32,6 +32,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -43,6 +45,7 @@ import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.index.IndexNotFoundException;
@@ -114,6 +117,12 @@ public class PriorityCacheTests extends ESTestCase {
 
         clusterService = mock(ClusterService.class);
         settings = Settings.EMPTY;
+        ClusterSettings clusterSettings = new ClusterSettings(
+            settings,
+            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(AnomalyDetectorSettings.MAX_CACHE_MISS_HANDLING_PER_SECOND)))
+        );
+        when(clusterService.getClusterSettings()).thenReturn(clusterSettings);
+
         threadPool = mock(ThreadPool.class);
         dedicatedCacheSize = 1;
         numMinSamples = 3;
@@ -177,6 +186,7 @@ public class PriorityCacheTests extends ESTestCase {
         // cache miss due to door keeper
         assertEquals(null, cacheProvider.get(modelId1, detector, point, entityName));
         assertEquals(1, cacheProvider.getTotalActiveEntities());
+        assertEquals(1, cacheProvider.getAllModels().size());
         ModelState<EntityModel> hitState = cacheProvider.get(modelId1, detector, point, entityName);
         assertEquals(detectorId, hitState.getDetectorId());
         EntityModel model = hitState.getModel();
@@ -239,10 +249,12 @@ public class PriorityCacheTests extends ESTestCase {
         }
         assertEquals(2, cacheProvider.getActiveEntities(detectorId2));
         assertEquals(3, cacheProvider.getTotalActiveEntities());
+        assertEquals(3, cacheProvider.getAllModels().size());
 
         when(memoryTracker.memoryToShed()).thenReturn(memoryPerEntity);
         cacheProvider.maintenance();
         assertEquals(2, cacheProvider.getTotalActiveEntities());
+        assertEquals(2, cacheProvider.getAllModels().size());
         assertEquals(1, cacheProvider.getActiveEntities(detectorId2));
     }
 
@@ -368,9 +380,11 @@ public class PriorityCacheTests extends ESTestCase {
             cacheProvider.get(modelId2, detector, point, entityName);
         }
         assertEquals(2, cacheProvider.getTotalActiveEntities());
+        assertEquals(2, cacheProvider.getAllModels().size());
         when(clock.instant()).thenReturn(Instant.now());
         cacheProvider.maintenance();
         assertEquals(0, cacheProvider.getTotalActiveEntities());
+        assertEquals(0, cacheProvider.getAllModels().size());
 
         for (int i = 0; i < 2; i++) {
             // doorkeeper should have been reset

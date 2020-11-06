@@ -42,6 +42,8 @@ import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
+import com.amazon.opendistroforelasticsearch.ad.indices.ADIndex;
+import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.ml.CheckpointDao;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
@@ -65,6 +67,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
     private final NodeStateManager stateManager;
     private final int coolDownMinutes;
     private final Clock clock;
+    private AnomalyDetectionIndices indexUtil;
 
     @Inject
     public EntityResultTransportAction(
@@ -77,7 +80,35 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
         CacheProvider entityCache,
         NodeStateManager stateManager,
         Settings settings,
-        Clock clock
+        AnomalyDetectionIndices indexUtil
+    ) {
+        this(
+            actionFilters,
+            transportService,
+            manager,
+            adCircuitBreakerService,
+            anomalyResultHandler,
+            checkpointDao,
+            entityCache,
+            stateManager,
+            settings,
+            Clock.systemUTC(),
+            indexUtil
+        );
+    }
+
+    protected EntityResultTransportAction(
+        ActionFilters actionFilters,
+        TransportService transportService,
+        ModelManager manager,
+        ADCircuitBreakerService adCircuitBreakerService,
+        MultiEntityResultHandler anomalyResultHandler,
+        CheckpointDao checkpointDao,
+        CacheProvider entityCache,
+        NodeStateManager stateManager,
+        Settings settings,
+        Clock clock,
+        AnomalyDetectionIndices indexUtil
     ) {
         super(EntityResultAction.NAME, transportService, actionFilters, EntityResultRequest::new);
         this.manager = manager;
@@ -88,12 +119,14 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
         this.stateManager = stateManager;
         this.coolDownMinutes = (int) (COOLDOWN_MINUTES.get(settings).getMinutes());
         this.clock = clock;
+        this.indexUtil = indexUtil;
     }
 
     @Override
     protected void doExecute(Task task, EntityResultRequest request, ActionListener<AcknowledgedResponse> listener) {
         if (adCircuitBreakerService.isOpen()) {
-            listener.onFailure(new LimitExceededException(request.getDetectorId(), CommonErrorMessages.MEMORY_CIRCUIT_BROKEN_ERR_MSG));
+            listener
+                .onFailure(new LimitExceededException(request.getDetectorId(), CommonErrorMessages.MEMORY_CIRCUIT_BROKEN_ERR_MSG, false));
             return;
         }
 
@@ -164,7 +197,9 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                                 executionStartTime,
                                 Instant.now(),
                                 null,
-                                Arrays.asList(new Entity(categoricalField, entityName))
+                                Arrays.asList(new Entity(categoricalField, entityName)),
+                                detector.getUser(),
+                                indexUtil.getSchemaVersion(ADIndex.RESULT)
                             )
                         );
                 }

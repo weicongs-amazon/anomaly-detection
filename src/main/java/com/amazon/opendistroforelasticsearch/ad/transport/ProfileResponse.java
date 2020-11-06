@@ -39,12 +39,16 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
     static final String COORDINATING_NODE = CommonName.COORDINATING_NODE;
     static final String SHINGLE_SIZE = CommonName.SHINGLE_SIZE;
     static final String TOTAL_SIZE = CommonName.TOTAL_SIZE_IN_BYTES;
+    static final String ACTIVE_ENTITY = CommonName.ACTIVE_ENTITIES;
     static final String MODELS = CommonName.MODELS;
+    static final String TOTAL_UPDATES = CommonName.TOTAL_UPDATES;
 
     private ModelProfile[] modelProfile;
     private int shingleSize;
     private String coordinatingNode;
     private long totalSizeInBytes;
+    private long activeEntities;
+    private long totalUpdates;
 
     /**
      * Constructor
@@ -59,9 +63,11 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
         for (int i = 0; i < size; i++) {
             modelProfile[i] = new ModelProfile(in);
         }
-        shingleSize = in.readVInt();
+        shingleSize = in.readInt();
         coordinatingNode = in.readString();
         totalSizeInBytes = in.readVLong();
+        activeEntities = in.readVLong();
+        totalUpdates = in.readVLong();
     }
 
     /**
@@ -74,6 +80,9 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
     public ProfileResponse(ClusterName clusterName, List<ProfileNodeResponse> nodes, List<FailedNodeException> failures) {
         super(clusterName, nodes, failures);
         totalSizeInBytes = 0L;
+        activeEntities = 0L;
+        totalUpdates = 0L;
+        shingleSize = -1;
         List<ModelProfile> modelProfileList = new ArrayList<>();
         for (ProfileNodeResponse response : nodes) {
             String curNodeId = response.getNode().getId();
@@ -81,11 +90,19 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
                 coordinatingNode = curNodeId;
                 shingleSize = response.getShingleSize();
             }
-            for (Map.Entry<String, Long> entry : response.getModelSize().entrySet()) {
-                totalSizeInBytes += entry.getValue();
-                modelProfileList.add(new ModelProfile(entry.getKey(), entry.getValue(), curNodeId));
+            if (response.getModelSize() != null) {
+                for (Map.Entry<String, Long> entry : response.getModelSize().entrySet()) {
+                    totalSizeInBytes += entry.getValue();
+                    modelProfileList.add(new ModelProfile(entry.getKey(), entry.getValue(), curNodeId));
+                }
             }
 
+            if (response.getActiveEntities() > 0) {
+                activeEntities += response.getActiveEntities();
+            }
+            if (response.getTotalUpdates() > totalUpdates) {
+                totalUpdates = response.getTotalUpdates();
+            }
         }
         if (coordinatingNode == null) {
             coordinatingNode = "";
@@ -100,9 +117,11 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
         for (ModelProfile profile : modelProfile) {
             profile.writeTo(out);
         }
-        out.writeVInt(shingleSize);
+        out.writeInt(shingleSize);
         out.writeString(coordinatingNode);
         out.writeVLong(totalSizeInBytes);
+        out.writeVLong(activeEntities);
+        out.writeVLong(totalUpdates);
     }
 
     @Override
@@ -120,6 +139,8 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
         builder.field(COORDINATING_NODE, coordinatingNode);
         builder.field(SHINGLE_SIZE, shingleSize);
         builder.field(TOTAL_SIZE, totalSizeInBytes);
+        builder.field(ACTIVE_ENTITY, activeEntities);
+        builder.field(TOTAL_UPDATES, totalUpdates);
         builder.startArray(MODELS);
         for (ModelProfile profile : modelProfile) {
             profile.toXContent(builder, params);
@@ -134,6 +155,14 @@ public class ProfileResponse extends BaseNodesResponse<ProfileNodeResponse> impl
 
     public int getShingleSize() {
         return shingleSize;
+    }
+
+    public long getActiveEntities() {
+        return activeEntities;
+    }
+
+    public long getTotalUpdates() {
+        return totalUpdates;
     }
 
     public String getCoordinatingNode() {

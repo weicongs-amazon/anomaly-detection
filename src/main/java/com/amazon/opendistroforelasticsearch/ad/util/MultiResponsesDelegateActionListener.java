@@ -36,19 +36,26 @@ public class MultiResponsesDelegateActionListener<T extends Mergeable> implement
 
     private final ActionListener<T> delegate;
     private final AtomicInteger collectedResponseCount;
-    private final int maxResponseCount;
+    private final AtomicInteger maxResponseCount;
     // save responses from multiple requests
     private final List<T> savedResponses;
     private List<String> exceptions;
     private String finalErrorMsg;
+    private final boolean returnOnPartialResults;
 
-    public MultiResponsesDelegateActionListener(ActionListener<T> delegate, int maxResponseCount, String finalErrorMsg) {
+    public MultiResponsesDelegateActionListener(
+        ActionListener<T> delegate,
+        int maxResponseCount,
+        String finalErrorMsg,
+        boolean returnOnPartialResults
+    ) {
         this.delegate = delegate;
         this.collectedResponseCount = new AtomicInteger(0);
-        this.maxResponseCount = maxResponseCount;
+        this.maxResponseCount = new AtomicInteger(maxResponseCount);
         this.savedResponses = Collections.synchronizedList(new ArrayList<T>());
         this.exceptions = Collections.synchronizedList(new ArrayList<String>());
         this.finalErrorMsg = finalErrorMsg;
+        this.returnOnPartialResults = returnOnPartialResults;
     }
 
     @Override
@@ -59,7 +66,7 @@ public class MultiResponsesDelegateActionListener<T extends Mergeable> implement
             }
         } finally {
             // If expectedResponseCount == 0 , collectedResponseCount.incrementAndGet() will be greater than expectedResponseCount
-            if (collectedResponseCount.incrementAndGet() >= maxResponseCount) {
+            if (collectedResponseCount.incrementAndGet() >= maxResponseCount.get()) {
                 finish();
             }
         }
@@ -74,25 +81,32 @@ public class MultiResponsesDelegateActionListener<T extends Mergeable> implement
         } finally {
             // no matter the asynchronous request is a failure or success, we need to increment the count.
             // We need finally here to increment the count when there is a failure.
-            if (collectedResponseCount.incrementAndGet() >= maxResponseCount) {
+            if (collectedResponseCount.incrementAndGet() >= maxResponseCount.get()) {
                 finish();
             }
         }
     }
 
     private void finish() {
-        if (this.exceptions.size() == 0) {
-            if (savedResponses.size() == 0) {
-                this.delegate.onFailure(new RuntimeException(NO_RESPONSE));
-            } else {
-                T response0 = savedResponses.get(0);
-                for (int i = 1; i < savedResponses.size(); i++) {
-                    response0.merge(savedResponses.get(i));
-                }
-                this.delegate.onResponse(response0);
+        if (this.returnOnPartialResults || this.exceptions.size() == 0) {
+            if (this.exceptions.size() > 0) {
+                LOG.error(String.format("Although returning result, there exists exceptions: %s", this.exceptions));
             }
+            handleSavedResponses();
         } else {
             this.delegate.onFailure(new RuntimeException(String.format(Locale.ROOT, finalErrorMsg + " Exceptions: %s", exceptions)));
+        }
+    }
+
+    private void handleSavedResponses() {
+        if (savedResponses.size() == 0) {
+            this.delegate.onFailure(new RuntimeException(NO_RESPONSE));
+        } else {
+            T response0 = savedResponses.get(0);
+            for (int i = 1; i < savedResponses.size(); i++) {
+                response0.merge(savedResponses.get(i));
+            }
+            this.delegate.onResponse(response0);
         }
     }
 

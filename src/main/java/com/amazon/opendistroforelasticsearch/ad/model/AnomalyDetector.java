@@ -47,6 +47,9 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.annotation.Generated;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonValue;
 import com.amazon.opendistroforelasticsearch.ad.util.ParseUtils;
 import com.amazon.opendistroforelasticsearch.commons.authuser.User;
 import com.google.common.base.Objects;
@@ -71,7 +74,6 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
     private static final String NAME_FIELD = "name";
     private static final String DESCRIPTION_FIELD = "description";
     private static final String TIMEFIELD_FIELD = "time_field";
-    private static final String SCHEMA_VERSION_FIELD = "schema_version";
     private static final String INDICES_FIELD = "indices";
     private static final String FILTER_QUERY_FIELD = "filter_query";
     private static final String FEATURE_ATTRIBUTES_FIELD = "feature_attributes";
@@ -154,7 +156,7 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
             throw new IllegalArgumentException("Shingle size must be a positive integer");
         }
         if (categoryFields != null && categoryFields.size() > CATEGORY_FIELD_LIMIT) {
-            throw new IllegalArgumentException("We only support filtering data by one categorical variable");
+            throw new IllegalArgumentException(CommonErrorMessages.CATEGORICAL_FIELD_NUMBER_SURPASSED + CATEGORY_FIELD_LIMIT);
         }
         this.detectorId = detectorId;
         this.version = version;
@@ -254,7 +256,7 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
             .field(DETECTION_INTERVAL_FIELD, detectionInterval)
             .field(WINDOW_DELAY_FIELD, windowDelay)
             .field(SHINGLE_SIZE_FIELD, shingleSize)
-            .field(SCHEMA_VERSION_FIELD, schemaVersion);
+            .field(CommonName.SCHEMA_VERSION_FIELD, schemaVersion);
 
         if (featureAttributes != null) {
             xContentBuilder.field(FEATURE_ATTRIBUTES_FIELD, featureAttributes.toArray());
@@ -334,7 +336,7 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
             : new IntervalTimeConfiguration(defaultDetectionWindowDelay.getSeconds(), ChronoUnit.SECONDS);
         Integer shingleSize = null;
         List<Feature> features = new ArrayList<>();
-        int schemaVersion = 0;
+        Integer schemaVersion = CommonValue.NO_SCHEMA_VERSION;
         Map<String, Object> uiMetadata = null;
         Instant lastUpdateTime = null;
         User user = null;
@@ -365,7 +367,7 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
                 case UI_METADATA_FIELD:
                     uiMetadata = parser.map();
                     break;
-                case SCHEMA_VERSION_FIELD:
+                case CommonName.SCHEMA_VERSION_FIELD:
                     schemaVersion = parser.intValue();
                     break;
                 case FILTER_QUERY_FIELD:
@@ -534,6 +536,10 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
     /**
      * If the given shingle size is null, return default based on the kind of detector;
      * otherwise, return the given shingle size.
+     *
+     * TODO: need to deal with the case where customers start with single-entity detector, we set it to 8 by default;
+     * then cx update it to multi-entity detector, we would still use 8 in this case.  Kibana needs to change to
+     * give the correct shingle size.
      * @param customShingleSize Given shingle size
      * @param categoryField Used to verify if this is a multi-entity or single-entity detector
      * @return Shingle size
@@ -574,5 +580,13 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
 
     public User getUser() {
         return user;
+    }
+
+    public void setUser(User user) {
+        this.user = user;
+    }
+
+    public boolean isMultientityDetector() {
+        return getCategoryField() != null && getCategoryField().size() > 0;
     }
 }

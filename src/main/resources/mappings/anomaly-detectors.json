@@ -1,7 +1,7 @@
 {
   "dynamic": false,
   "_meta": {
-    "schema_version": 1
+    "schema_version": 2
   },
   "properties": {
     "schema_version": {
@@ -105,6 +105,7 @@
       "enabled": false
     },
     "user": {
+      "type": "nested",
       "properties": {
         "name": {
           "type": "text",

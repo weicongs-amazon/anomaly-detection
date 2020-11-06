@@ -227,6 +227,9 @@ public class AbstractADTest extends ESTestCase {
     }
 
     public void tearDownTestNodes() {
+        if (testNodes == null) {
+            return;
+        }
         for (FakeNode testNode : testNodes) {
             testNode.close();
         }
@@ -238,8 +241,8 @@ public class AbstractADTest extends ESTestCase {
         Class<? extends Exception> exceptionType,
         String msg
     ) {
-        Exception e = expectThrows(exceptionType, () -> listener.actionGet());
-        assertThat(e.getMessage(), containsString(msg));
+        Exception e = expectThrows(exceptionType, () -> listener.actionGet(20_000));
+        assertThat("actual message: " + e.getMessage(), e.getMessage(), containsString(msg));
     }
 
     @Override

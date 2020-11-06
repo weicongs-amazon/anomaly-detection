@@ -15,9 +15,15 @@
 
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
+import static com.amazon.opendistroforelasticsearch.ad.util.ParseUtils.getUserContext;
+
+import java.io.IOException;
+import java.util.List;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.HandledTransportAction;
 import org.elasticsearch.action.support.WriteRequest;
@@ -26,14 +32,19 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.transport.TransportService;
 
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.rest.handler.AnomalyDetectorFunction;
 import com.amazon.opendistroforelasticsearch.ad.rest.handler.IndexAnomalyDetectorActionHandler;
+import com.amazon.opendistroforelasticsearch.commons.authuser.User;
 
 public class IndexAnomalyDetectorTransportAction extends HandledTransportAction<IndexAnomalyDetectorRequest, IndexAnomalyDetectorResponse> {
     private static final Logger LOG = LogManager.getLogger(IndexAnomalyDetectorTransportAction.class);
@@ -61,6 +72,8 @@ public class IndexAnomalyDetectorTransportAction extends HandledTransportAction<
 
     @Override
     protected void doExecute(Task task, IndexAnomalyDetectorRequest request, ActionListener<IndexAnomalyDetectorResponse> listener) {
+        User user = getUserContext(client);
+        anomalyDetectionIndices.updateMappingIfNecessary();
         String detectorId = request.getDetectorID();
         long seqNo = request.getSeqNo();
         long primaryTerm = request.getPrimaryTerm();
@@ -72,27 +85,60 @@ public class IndexAnomalyDetectorTransportAction extends HandledTransportAction<
         Integer maxMultiEntityAnomalyDetectors = request.getMaxMultiEntityAnomalyDetectors();
         Integer maxAnomalyFeatures = request.getMaxAnomalyFeatures();
 
-        IndexAnomalyDetectorActionHandler indexAnomalyDetectorActionHandler = new IndexAnomalyDetectorActionHandler(
-            clusterService,
-            client,
-            listener,
-            anomalyDetectionIndices,
-            detectorId,
-            seqNo,
-            primaryTerm,
-            refreshPolicy,
-            detector,
-            requestTimeout,
-            maxSingleEntityAnomalyDetectors,
-            maxMultiEntityAnomalyDetectors,
-            maxAnomalyFeatures,
-            method,
-            xContentRegistry
-        );
-        try {
-            indexAnomalyDetectorActionHandler.start();
-        } catch (Exception e) {
+        checkIndicesAndExecute(detector.getIndices(), () -> {
+            try (ThreadContext.StoredContext context = client.threadPool().getThreadContext().stashContext()) {
+                IndexAnomalyDetectorActionHandler indexAnomalyDetectorActionHandler = new IndexAnomalyDetectorActionHandler(
+                    clusterService,
+                    client,
+                    listener,
+                    anomalyDetectionIndices,
+                    detectorId,
+                    seqNo,
+                    primaryTerm,
+                    refreshPolicy,
+                    detector,
+                    requestTimeout,
+                    maxSingleEntityAnomalyDetectors,
+                    maxMultiEntityAnomalyDetectors,
+                    maxAnomalyFeatures,
+                    method,
+                    xContentRegistry,
+                    user
+                );
+                try {
+                    indexAnomalyDetectorActionHandler.start();
+                } catch (IOException exception) {
+                    LOG.error("Fail to index detector", exception);
+                    listener.onFailure(exception);
+                }
+            } catch (Exception e) {
+                LOG.error(e);
+                listener.onFailure(e);
+            }
+
+        }, listener);
+    }
+
+    private void checkIndicesAndExecute(
+        List<String> indices,
+        AnomalyDetectorFunction function,
+        ActionListener<IndexAnomalyDetectorResponse> listener
+    ) {
+        SearchRequest searchRequest = new SearchRequest()
+            .indices(indices.toArray(new String[0]))
+            .source(new SearchSourceBuilder().size(1).query(QueryBuilders.matchAllQuery()));
+        client.search(searchRequest, ActionListener.wrap(r -> {
+            try (ThreadContext.StoredContext context = client.threadPool().getThreadContext().stashContext()) {
+                function.execute();
+            } catch (Exception e) {
+                LOG.error(e);
+                listener.onFailure(e);
+            }
+        }, e -> {
+            // Due to below issue with security plugin, we get security_exception when invalid index name is mentioned.
+            // https://github.com/opendistro-for-elasticsearch/security/issues/718
             LOG.error(e);
-        }
+            listener.onFailure(e);
+        }));
     }
 }

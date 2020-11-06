@@ -16,7 +16,6 @@
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,9 +29,10 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 
+import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
-import com.amazon.opendistroforelasticsearch.ad.model.ProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
 
 /**
  *  This class contains the logic to extract the stats from the nodes
@@ -41,6 +41,7 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
 
     private ModelManager modelManager;
     private FeatureManager featureManager;
+    private CacheProvider cacheProvider;
 
     /**
      * Constructor
@@ -51,6 +52,7 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
      * @param actionFilters Action Filters
      * @param modelManager model manager object
      * @param featureManager feature manager object
+     * @param cacheProvider cache provider
      */
     @Inject
     public ProfileTransportAction(
@@ -59,7 +61,8 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
         TransportService transportService,
         ActionFilters actionFilters,
         ModelManager modelManager,
-        FeatureManager featureManager
+        FeatureManager featureManager,
+        CacheProvider cacheProvider
     ) {
         super(
             ProfileAction.NAME,
@@ -74,6 +77,7 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
         );
         this.modelManager = modelManager;
         this.featureManager = featureManager;
+        this.cacheProvider = cacheProvider;
     }
 
     @Override
@@ -94,17 +98,31 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
     @Override
     protected ProfileNodeResponse nodeOperation(ProfileNodeRequest request) {
         String detectorId = request.getDetectorId();
-        Set<ProfileName> profiles = request.getProfilesToBeRetrieved();
+        Set<DetectorProfileName> profiles = request.getProfilesToBeRetrieved();
         int shingleSize = -1;
-        if (profiles.contains(ProfileName.COORDINATING_NODE) || profiles.contains(ProfileName.SHINGLE_SIZE)) {
-            shingleSize = featureManager.getShingleSize(detectorId);
-        }
+        long activeEntity = 0;
+        long totalUpdates = 0;
         Map<String, Long> modelSize = null;
-        if (profiles.contains(ProfileName.TOTAL_SIZE_IN_BYTES) || profiles.contains(ProfileName.MODELS)) {
-            modelSize = modelManager.getModelSize(detectorId);
+        if (request.isForMultiEntityDetector()) {
+            if (profiles.contains(DetectorProfileName.ACTIVE_ENTITIES)) {
+                activeEntity = cacheProvider.get().getActiveEntities(detectorId);
+            }
+            if (profiles.contains(DetectorProfileName.INIT_PROGRESS)) {
+                totalUpdates = cacheProvider.get().getTotalUpdates(detectorId);
+            }
+            if (profiles.contains(DetectorProfileName.TOTAL_SIZE_IN_BYTES) || profiles.contains(DetectorProfileName.MODELS)) {
+                modelSize = cacheProvider.get().getModelSize(detectorId);
+            }
         } else {
-            modelSize = new HashMap<>();
+            if (profiles.contains(DetectorProfileName.COORDINATING_NODE) || profiles.contains(DetectorProfileName.SHINGLE_SIZE)) {
+                shingleSize = featureManager.getShingleSize(detectorId);
+            }
+
+            if (profiles.contains(DetectorProfileName.TOTAL_SIZE_IN_BYTES) || profiles.contains(DetectorProfileName.MODELS)) {
+                modelSize = modelManager.getModelSize(detectorId);
+            }
         }
-        return new ProfileNodeResponse(clusterService.localNode(), modelSize, shingleSize);
+
+        return new ProfileNodeResponse(clusterService.localNode(), modelSize, shingleSize, activeEntity, totalUpdates);
     }
 }

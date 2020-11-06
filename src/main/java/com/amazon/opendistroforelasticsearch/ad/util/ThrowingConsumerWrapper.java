@@ -23,7 +23,7 @@ public class ThrowingConsumerWrapper {
      *  that does not throw the corresponding checked exception.  This happens
      *  when we are in a ES function that we have no control over its signature.
      * Convert the checked exception thrown by by throwingConsumer to a RuntimeException
-     * so that the compier won't complain.
+     * so that the compiler won't complain.
      * @param <T> the method's parameter type
      * @param throwingConsumer the method reference that can throw checked exception
      * @return converted method reference

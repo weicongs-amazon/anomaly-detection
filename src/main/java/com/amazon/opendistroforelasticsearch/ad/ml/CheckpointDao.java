@@ -60,6 +60,7 @@ import org.elasticsearch.index.reindex.DeleteByQueryRequest;
 import org.elasticsearch.index.reindex.ScrollableHitSource;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.indices.ADIndex;
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.util.BulkUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
@@ -111,6 +112,7 @@ public class CheckpointDao {
     private final AnomalyDetectionIndices indexUtil;
     private final RateLimiter bulkRateLimiter;
     private final int maxBulkRequestSize;
+    private final JsonParser parser = new JsonParser();
 
     /**
      * Constructor with dependencies and configuration.
@@ -151,8 +153,10 @@ public class CheckpointDao {
         this.clock = clock;
         this.checkpointInterval = checkpointInterval;
         this.indexUtil = indexUtil;
+        // each checkpoint with model initialized is roughly 250 KB if we are using shingle size 1 with 1 feature
+        // 1k limit will send 250 KB * 1000 = 250 MB
         this.maxBulkRequestSize = maxBulkRequestSize;
-        // 1 bulk request per minute. 1 / 60 seconds = 0. 02
+        // 1 bulk request per 1/bulkPerSecond seconds.
         this.bulkRateLimiter = RateLimiter.create(bulkPerSecond);
     }
 
@@ -283,6 +287,10 @@ public class CheckpointDao {
         clientUtil.<BulkRequest, BulkResponse>execute(BulkAction.INSTANCE, bulkRequest, ActionListener.wrap(r -> {
             if (r.hasFailures()) {
                 requests.addAll(BulkUtil.getIndexRequestToRetry(bulkRequest, r));
+            } else if (requests.size() >= maxBulkRequestSize / 2) {
+                // during maintenance, we may have much more waiting in the queue.
+                // trigger another flush if that's the case.
+                flush();
             }
         }, e -> {
             logger.error("Failed bulking checkpoints", e);
@@ -336,6 +344,7 @@ public class CheckpointDao {
                 source.put(DETECTOR_ID, modelState.getDetectorId());
                 source.put(FIELD_MODEL, serializedModel);
                 source.put(TIMESTAMP, ZonedDateTime.now(ZoneOffset.UTC));
+                source.put(CommonName.SCHEMA_VERSION_FIELD, indexUtil.getSchemaVersion(ADIndex.CHECKPOINT));
                 requests.add(new IndexRequest(indexName).id(modelId).source(source));
                 modelState.setLastCheckpointTime(clock.instant());
                 if (requests.size() >= maxBulkRequestSize) {
@@ -458,7 +467,7 @@ public class CheckpointDao {
         try {
             return AccessController.doPrivileged((PrivilegedAction<Entry<EntityModel, Instant>>) () -> {
                 String model = (String) (checkpoint.get(FIELD_MODEL));
-                JsonObject json = JsonParser.parseString(model).getAsJsonObject();
+                JsonObject json = parser.parse(model).getAsJsonObject();
                 ArrayDeque<double[]> samples = new ArrayDeque<>(
                     Arrays.asList(this.gson.fromJson(json.getAsJsonArray(ENTITY_SAMPLE), new double[0][0].getClass()))
                 );

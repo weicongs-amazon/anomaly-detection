@@ -17,6 +17,7 @@ package com.amazon.opendistroforelasticsearch.ad.rest.handler;
 
 import static com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector.ANOMALY_DETECTORS_INDEX;
 import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.XCONTENT_WITH_TYPE;
+import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -49,6 +50,7 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
@@ -61,6 +63,7 @@ import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.transport.IndexAnomalyDetectorResponse;
 import com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils;
+import com.amazon.opendistroforelasticsearch.commons.authuser.User;
 
 /**
  * Anomaly detector REST action handler to process POST/PUT request.
@@ -93,6 +96,7 @@ public class IndexAnomalyDetectorActionHandler {
     private final Client client;
     private final NamedXContentRegistry xContentRegistry;
     private final ActionListener<IndexAnomalyDetectorResponse> listener;
+    private final User user;
 
     /**
      * Constructor function.
@@ -112,6 +116,7 @@ public class IndexAnomalyDetectorActionHandler {
      * @param maxAnomalyFeatures      max features allowed per detector
      * @param method                  Rest Method type
      * @param xContentRegistry        Registry which is used for XContentParser
+     * @param user                    User context
      */
     public IndexAnomalyDetectorActionHandler(
         ClusterService clusterService,
@@ -128,7 +133,8 @@ public class IndexAnomalyDetectorActionHandler {
         Integer maxMultiEntityAnomalyDetectors,
         Integer maxAnomalyFeatures,
         RestRequest.Method method,
-        NamedXContentRegistry xContentRegistry
+        NamedXContentRegistry xContentRegistry,
+        User user
     ) {
         this.clusterService = clusterService;
         this.client = client;
@@ -145,6 +151,7 @@ public class IndexAnomalyDetectorActionHandler {
         this.maxAnomalyFeatures = maxAnomalyFeatures;
         this.method = method;
         this.xContentRegistry = xContentRegistry;
+        this.user = user;
     }
 
     /**
@@ -197,31 +204,52 @@ public class IndexAnomalyDetectorActionHandler {
             );
     }
 
-    private void onGetAnomalyDetectorResponse(GetResponse response) throws IOException {
+    private void onGetAnomalyDetectorResponse(GetResponse response) {
         if (!response.isExists()) {
             listener
                 .onFailure(new ElasticsearchStatusException("AnomalyDetector is not found with id: " + detectorId, RestStatus.NOT_FOUND));
             return;
         }
+        try (XContentParser parser = RestHandlerUtils.createXContentParserFromRegistry(xContentRegistry, response.getSourceAsBytesRef())) {
+            ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.nextToken(), parser::getTokenLocation);
+            AnomalyDetector existingDetector = AnomalyDetector.parse(parser, response.getId(), response.getVersion());
+            if (!hasCategoryField(existingDetector) && hasCategoryField(this.anomalyDetector)) {
+                validateAgainstExistingMultiEntityAnomalyDetector(detectorId);
+            } else {
+                validateCategoricalField(detectorId);
+            }
+        } catch (IOException e) {
+            String message = "Failed to parse anomaly detector " + detectorId;
+            logger.error(message, e);
+            listener.onFailure(new ElasticsearchStatusException(message, RestStatus.INTERNAL_SERVER_ERROR));
+        }
 
-        validateCategoricalField(detectorId);
+    }
+
+    private boolean hasCategoryField(AnomalyDetector detector) {
+        return detector.getCategoryField() != null && !detector.getCategoryField().isEmpty();
+    }
+
+    private void validateAgainstExistingMultiEntityAnomalyDetector(String detectorId) {
+        QueryBuilder query = QueryBuilders.boolQuery().filter(QueryBuilders.existsQuery(AnomalyDetector.CATEGORY_FIELD));
+
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().query(query).size(0).timeout(requestTimeout);
+
+        SearchRequest searchRequest = new SearchRequest(ANOMALY_DETECTORS_INDEX).source(searchSourceBuilder);
+
+        client
+            .search(
+                searchRequest,
+                ActionListener
+                    .wrap(response -> onSearchMultiEntityAdResponse(response, detectorId), exception -> listener.onFailure(exception))
+            );
     }
 
     private void createAnomalyDetector() {
         try {
             List<String> categoricalFields = anomalyDetector.getCategoryField();
             if (categoricalFields != null && categoricalFields.size() > 0) {
-                QueryBuilder query = QueryBuilders.boolQuery().filter(QueryBuilders.existsQuery(AnomalyDetector.CATEGORY_FIELD));
-
-                SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().query(query).size(0).timeout(requestTimeout);
-
-                SearchRequest searchRequest = new SearchRequest(ANOMALY_DETECTORS_INDEX).source(searchSourceBuilder);
-
-                client
-                    .search(
-                        searchRequest,
-                        ActionListener.wrap(response -> onSearchMultiEntityAdResponse(response), exception -> listener.onFailure(exception))
-                    );
+                validateAgainstExistingMultiEntityAnomalyDetector(null);
             } else {
                 QueryBuilder query = QueryBuilders.matchAllQuery();
                 SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().query(query).size(0).timeout(requestTimeout);
@@ -250,13 +278,13 @@ public class IndexAnomalyDetectorActionHandler {
         }
     }
 
-    private void onSearchMultiEntityAdResponse(SearchResponse response) throws IOException {
+    private void onSearchMultiEntityAdResponse(SearchResponse response, String detectorId) throws IOException {
         if (response.getHits().getTotalHits().value >= maxMultiEntityAnomalyDetectors) {
             String errorMsg = EXCEEDED_MAX_MULTI_ENTITY_DETECTORS_PREFIX_MSG + maxMultiEntityAnomalyDetectors;
             logger.error(errorMsg);
             listener.onFailure(new IllegalArgumentException(errorMsg));
         } else {
-            validateCategoricalField(null);
+            validateCategoricalField(detectorId);
         }
     }
 
@@ -287,25 +315,37 @@ public class IndexAnomalyDetectorActionHandler {
             // example getMappingsResponse:
             // GetFieldMappingsResponse{mappings={server-metrics={_doc={service=FieldMappingMetadata{fullName='service',
             // source=org.elasticsearch.common.bytes.BytesArray@7ba87dbd}}}}}
+            // for nested field, it would be
+            // GetFieldMappingsResponse{mappings={server-metrics={_doc={host_nest.host2=FieldMappingMetadata{fullName='host_nest.host2',
+            // source=org.elasticsearch.common.bytes.BytesArray@8fb4de08}}}}}
             boolean foundField = false;
             Map<String, Map<String, Map<String, FieldMappingMetadata>>> mappingsByIndex = getMappingsResponse.mappings();
 
             for (Map<String, Map<String, FieldMappingMetadata>> mappingsByType : mappingsByIndex.values()) {
                 for (Map<String, FieldMappingMetadata> mappingsByField : mappingsByType.values()) {
                     for (Map.Entry<String, FieldMappingMetadata> field2Metadata : mappingsByField.entrySet()) {
+                        // example output:
+                        // host_nest.host2=FieldMappingMetadata{fullName='host_nest.host2',
+                        // source=org.elasticsearch.common.bytes.BytesArray@8fb4de08}
                         FieldMappingMetadata fieldMetadata = field2Metadata.getValue();
 
                         if (fieldMetadata != null) {
-                            Object metadata = fieldMetadata.sourceAsMap().get(categoryField0);
-                            if (metadata != null && metadata instanceof Map) {
-                                foundField = true;
-                                Map<String, Object> metadataMap = (Map<String, Object>) metadata;
-                                String typeName = (String) metadataMap.get(CommonName.TYPE);
-                                if (!typeName.equals(CommonName.KEYWORD_TYPE) && !typeName.equals(CommonName.IP_TYPE)) {
-                                    listener.onFailure(new IllegalArgumentException(CATEGORICAL_FIELD_TYPE_ERR_MSG));
-                                    return;
+                            // sourceAsMap returns sth like {host2={type=keyword}} with host2 being a nested field
+                            Map<String, Object> fieldMap = fieldMetadata.sourceAsMap();
+                            if (fieldMap != null) {
+                                for (Object type : fieldMap.values()) {
+                                    if (type != null && type instanceof Map) {
+                                        foundField = true;
+                                        Map<String, Object> metadataMap = (Map<String, Object>) type;
+                                        String typeName = (String) metadataMap.get(CommonName.TYPE);
+                                        if (!typeName.equals(CommonName.KEYWORD_TYPE) && !typeName.equals(CommonName.IP_TYPE)) {
+                                            listener.onFailure(new IllegalArgumentException(CATEGORICAL_FIELD_TYPE_ERR_MSG));
+                                            return;
+                                        }
+                                    }
                                 }
                             }
+
                         }
                     }
                 }
@@ -408,7 +448,7 @@ public class IndexAnomalyDetectorActionHandler {
             anomalyDetector.getSchemaVersion(),
             Instant.now(),
             anomalyDetector.getCategoryField(),
-            anomalyDetector.getUser()
+            user
         );
         IndexRequest indexRequest = new IndexRequest(ANOMALY_DETECTORS_INDEX)
             .setRefreshPolicy(refreshPolicy)
@@ -434,6 +474,7 @@ public class IndexAnomalyDetectorActionHandler {
                             indexResponse.getVersion(),
                             indexResponse.getSeqNo(),
                             indexResponse.getPrimaryTerm(),
+                            detector,
                             RestStatus.CREATED
                         )
                     );

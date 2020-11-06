@@ -102,6 +102,7 @@ import org.elasticsearch.test.rest.ESRestTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonValue;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorExecutionInput;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
@@ -225,7 +226,7 @@ public class TestHelpers {
             ImmutableList.of(randomFeature(true)),
             randomQuery(),
             randomIntervalTimeConfiguration(),
-            randomIntervalTimeConfiguration(),
+            new IntervalTimeConfiguration(0, ChronoUnit.MINUTES),
             randomIntBetween(1, 2000),
             null,
             randomInt(),
@@ -434,7 +435,9 @@ public class TestHelpers {
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
-            error
+            error,
+            randomUser(),
+            CommonValue.NO_SCHEMA_VERSION
         );
     }
 
@@ -454,7 +457,9 @@ public class TestHelpers {
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             error,
-            Arrays.asList(new Entity(randomAlphaOfLength(5), randomAlphaOfLength(5)))
+            Arrays.asList(new Entity(randomAlphaOfLength(5), randomAlphaOfLength(5))),
+            randomUser(),
+            CommonValue.NO_SCHEMA_VERSION
         );
     }
 

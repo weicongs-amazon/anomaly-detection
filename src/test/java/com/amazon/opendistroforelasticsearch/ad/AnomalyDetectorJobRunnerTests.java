@@ -61,6 +61,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
@@ -112,6 +113,9 @@ public class AnomalyDetectorJobRunnerTests extends AbstractADTest {
     @Mock
     private AnomalyIndexHandler<AnomalyResult> anomalyResultHandler;
 
+    @Mock
+    private AnomalyDetectionIndices indexUtil;
+
     private DetectionStateHandler detectorStateHandler;
 
     @BeforeClass
@@ -132,7 +136,9 @@ public class AnomalyDetectorJobRunnerTests extends AbstractADTest {
         ThreadFactory threadFactory = EsExecutors.daemonThreadFactory(EsExecutors.threadName("node1", "test-ad"));
         ThreadContext threadContext = new ThreadContext(Settings.EMPTY);
         executorService = EsExecutors.newFixed("test-ad", 4, 100, threadFactory, threadContext);
-        doReturn(executorService).when(mockedThreadPool).executor(anyString());
+        Mockito.doReturn(executorService).when(mockedThreadPool).executor(anyString());
+        Mockito.doReturn(mockedThreadPool).when(client).threadPool();
+        Mockito.doReturn(threadContext).when(mockedThreadPool).getThreadContext();
         runner.setThreadPool(mockedThreadPool);
         runner.setClient(client);
         runner.setClientUtil(clientUtil);
@@ -165,6 +171,8 @@ public class AnomalyDetectorJobRunnerTests extends AbstractADTest {
             stateManager
         );
         runner.setDetectionStateHandler(detectorStateHandler);
+
+        runner.setIndexUtil(indexUtil);
 
         lockService = new LockService(client, clusterService);
         doReturn(lockService).when(context).getLockService();

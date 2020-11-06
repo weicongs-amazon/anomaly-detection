@@ -15,6 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.ad.feature;
 
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MAX_ENTITIES_FOR_PREVIEW;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY;
 import static org.apache.commons.math3.linear.MatrixUtils.createRealMatrix;
 
@@ -67,8 +68,10 @@ import org.elasticsearch.threadpool.ThreadPool;
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.Interpolator;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.Feature;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
@@ -79,7 +82,6 @@ import com.amazon.opendistroforelasticsearch.ad.util.ParseUtils;
  */
 public class SearchFeatureDao {
 
-    protected static final String AGG_NAME_MAX = "max_timefield";
     protected static final String AGG_NAME_MIN = "min_timefield";
     protected static final String AGG_NAME_TERM = "term_agg";
 
@@ -92,6 +94,7 @@ public class SearchFeatureDao {
     private final ClientUtil clientUtil;
     private ThreadPool threadPool;
     private int maxEntitiesPerQuery;
+    private int maxEntitiesForPreview;
 
     /**
      * Constructor injection.
@@ -120,6 +123,8 @@ public class SearchFeatureDao {
         this.threadPool = threadPool;
         this.maxEntitiesPerQuery = MAX_ENTITIES_PER_QUERY.get(settings);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(MAX_ENTITIES_PER_QUERY, it -> maxEntitiesPerQuery = it);
+        this.maxEntitiesForPreview = MAX_ENTITIES_FOR_PREVIEW.get(settings);
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(MAX_ENTITIES_FOR_PREVIEW, it -> maxEntitiesForPreview = it);
     }
 
     /**
@@ -133,14 +138,14 @@ public class SearchFeatureDao {
     @Deprecated
     public Optional<Long> getLatestDataTime(AnomalyDetector detector) {
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
-            .aggregation(AggregationBuilders.max(AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .size(0);
         SearchRequest searchRequest = new SearchRequest().indices(detector.getIndices().toArray(new String[0])).source(searchSourceBuilder);
         return clientUtil
             .<SearchRequest, SearchResponse>timedRequest(searchRequest, logger, client::search)
             .map(SearchResponse::getAggregations)
             .map(aggs -> aggs.asMap())
-            .map(map -> (Max) map.get(AGG_NAME_MAX))
+            .map(map -> (Max) map.get(CommonName.AGG_NAME_MAX))
             .map(agg -> (long) agg.getValue());
     }
 
@@ -152,20 +157,62 @@ public class SearchFeatureDao {
      */
     public void getLatestDataTime(AnomalyDetector detector, ActionListener<Optional<Long>> listener) {
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
-            .aggregation(AggregationBuilders.max(AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .size(0);
         SearchRequest searchRequest = new SearchRequest().indices(detector.getIndices().toArray(new String[0])).source(searchSourceBuilder);
         client
-            .search(searchRequest, ActionListener.wrap(response -> listener.onResponse(getLatestDataTime(response)), listener::onFailure));
+            .search(
+                searchRequest,
+                ActionListener.wrap(response -> listener.onResponse(ParseUtils.getLatestDataTime(response)), listener::onFailure)
+            );
     }
 
-    private Optional<Long> getLatestDataTime(SearchResponse searchResponse) {
-        return Optional
-            .ofNullable(searchResponse)
-            .map(SearchResponse::getAggregations)
-            .map(aggs -> aggs.asMap())
-            .map(map -> (Max) map.get(AGG_NAME_MAX))
-            .map(agg -> (long) agg.getValue());
+    /**
+     * Get list of entities with high count in descending order within specified time range
+     * @param detector detector config
+     * @param startTime start time of time range
+     * @param endTime end time of time range
+     * @param listener listener to return back the entities
+     */
+    public void getHighestCountEntities(AnomalyDetector detector, long startTime, long endTime, ActionListener<List<Entity>> listener) {
+        RangeQueryBuilder rangeQuery = new RangeQueryBuilder(detector.getTimeField())
+            .from(startTime)
+            .to(endTime)
+            .format("epoch_millis")
+            .includeLower(true)
+            .includeUpper(false);
+
+        BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery().filter(rangeQuery).filter(detector.getFilterQuery());
+        TermsAggregationBuilder termsAgg = AggregationBuilders
+            .terms(AGG_NAME_TERM)
+            .field(detector.getCategoryField().get(0))
+            .size(maxEntitiesForPreview);
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
+            .query(boolQueryBuilder)
+            .aggregation(termsAgg)
+            .trackTotalHits(false)
+            .size(0);
+        SearchRequest searchRequest = new SearchRequest().indices(detector.getIndices().toArray(new String[0])).source(searchSourceBuilder);
+        ActionListener<SearchResponse> termsListener = ActionListener.wrap(response -> {
+            Aggregations aggs = response.getAggregations();
+            if (aggs == null) {
+                listener.onResponse(Collections.emptyList());
+                return;
+            }
+
+            List<Entity> results = aggs
+                .asList()
+                .stream()
+                .filter(agg -> AGG_NAME_TERM.equals(agg.getName()))
+                .flatMap(agg -> ((Terms) agg).getBuckets().stream())
+                .map(bucket -> bucket.getKeyAsString())
+                .collect(Collectors.toList())
+                .stream()
+                .map(entityValue -> new Entity(detector.getCategoryField().get(0), entityValue))
+                .collect(Collectors.toList());
+            listener.onResponse(results);
+        }, listener::onFailure);
+        client.search(searchRequest, termsListener);
     }
 
     /**
@@ -184,7 +231,7 @@ public class SearchFeatureDao {
 
         SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder()
             .query(internalFilterQuery)
-            .aggregation(AggregationBuilders.max(AGG_NAME_MAX).field(detector.getTimeField()))
+            .aggregation(AggregationBuilders.max(CommonName.AGG_NAME_MAX).field(detector.getTimeField()))
             .aggregation(AggregationBuilders.min(AGG_NAME_MIN).field(detector.getTimeField()))
             .trackTotalHits(false)
             .size(0);
@@ -202,7 +249,7 @@ public class SearchFeatureDao {
             .map(SearchResponse::getAggregations)
             .map(aggs -> aggs.asMap());
 
-        Optional<Long> latest = mapOptional.map(map -> (Max) map.get(AGG_NAME_MAX)).map(agg -> (long) agg.getValue());
+        Optional<Long> latest = mapOptional.map(map -> (Max) map.get(CommonName.AGG_NAME_MAX)).map(agg -> (long) agg.getValue());
 
         Optional<Long> earliest = mapOptional.map(map -> (Min) map.get(AGG_NAME_MIN)).map(agg -> (long) agg.getValue());
 
@@ -746,9 +793,11 @@ public class SearchFeatureDao {
                     .stream()
                     .filter(agg -> AGG_NAME_TERM.equals(agg.getName()))
                     .flatMap(agg -> ((Terms) agg).getBuckets().stream())
-                    .collect(
-                        Collectors.toMap(Terms.Bucket::getKeyAsString, bucket -> parseBucket(bucket, detector.getEnabledFeatureIds()).get())
-                    );
+                    .collect(Collectors.toMap(Terms.Bucket::getKeyAsString, bucket -> parseBucket(bucket, detector.getEnabledFeatureIds())))
+                    .entrySet()
+                    .stream()
+                    .filter(entry -> entry.getValue().isPresent())
+                    .collect(Collectors.toMap(Entry::getKey, entry -> entry.getValue().get()));
 
                 listener.onResponse(results);
             }, listener::onFailure);
@@ -759,8 +808,8 @@ public class SearchFeatureDao {
                     new ThreadedActionListener<>(logger, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, termsListener, false)
                 );
 
-        } catch (IOException e) {
-            throw new EndRunException(detector.getDetectorId(), CommonErrorMessages.INVALID_SEARCH_QUERY_MSG, e, true);
+        } catch (Exception e) {
+            throw new EndRunException(detector.getDetectorId(), CommonErrorMessages.INVALID_SEARCH_QUERY_MSG, e, false);
         }
     }
 
