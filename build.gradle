@@ -188,7 +188,7 @@ testClusters.javaRestTest {
             return  new RegularFile() {
                 @Override
                 File getAsFile() {
-                    return fileTree("src/test/resources/job-scheduler").getSingleFile()
+                    return fileTree("src/javaRestTest/resources/job-scheduler").getSingleFile()
                 }
             }
         }
@@ -363,6 +363,10 @@ dependencies {
     testImplementation group: 'org.javassist', name: 'javassist', version: '3.27.0-GA'
     testCompile group: 'net.bytebuddy', name: 'byte-buddy', version: '1.9.15'
     testCompile group: 'net.bytebuddy', name: 'byte-buddy-agent', version: '1.9.15'
+
+    javaRestTestImplementation project.sourceSets.main.runtimeClasspath
+    javaRestTestImplementation project.sourceSets.test.runtimeClasspath
+
 
     checkstyle "com.puppycrawl.tools:checkstyle:${project.checkstyle.toolVersion}"
 }
