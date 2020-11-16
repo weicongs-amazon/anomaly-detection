@@ -138,7 +138,7 @@ public abstract class AnomalyDetectorRestTestCase extends ODFERestTestCase {
         assertEquals("Unable to get anomaly detector " + detectorId, RestStatus.OK, restStatus(response));
         XContentParser parser = createAdParser(XContentType.JSON.xContent(), response.getEntity().getContent());
         parser.nextToken();
-        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.currentToken(), parser::getTokenLocation);
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.currentToken(), parser);
 
         String id = null;
         Long version = null;
