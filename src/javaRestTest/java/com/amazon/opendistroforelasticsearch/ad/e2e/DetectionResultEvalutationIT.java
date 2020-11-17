@@ -34,7 +34,8 @@ import java.util.Set;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RestClient;
 
-import com.amazon.opendistroforelasticsearch.ODFERestTestCase;
+
+import com.amazon.opendistroforelasticsearch.ad.ODFERestTestCase;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;

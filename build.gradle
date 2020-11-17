@@ -364,10 +364,9 @@ dependencies {
     testCompile group: 'net.bytebuddy', name: 'byte-buddy', version: '1.9.15'
     testCompile group: 'net.bytebuddy', name: 'byte-buddy-agent', version: '1.9.15'
 
+    javaRestTestImplementation "com.amazon.opendistroforelasticsearch:opendistro-job-scheduler-spi:1.12.0.0"
+    javaRestTestImplementation project.sourceSets.main.compileClasspath
     javaRestTestImplementation project.sourceSets.main.runtimeClasspath
-    javaRestTestImplementation project.sourceSets.test.runtimeClasspath
-
-
     checkstyle "com.puppycrawl.tools:checkstyle:${project.checkstyle.toolVersion}"
 }
 

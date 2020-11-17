@@ -37,6 +37,7 @@ import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
+import org.elasticsearch.client.WarningFailureException;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
@@ -107,7 +108,15 @@ public abstract class ODFERestTestCase extends ESRestTestCase {
             for (Map<String, Object> index : parserList) {
                 String indexName = (String) index.get("index");
                 if (indexName != null && !".opendistro_security".equals(indexName)) {
-                    client().performRequest(new Request("DELETE", "/" + indexName));
+                    try {
+                        client().performRequest(new Request("DELETE", "/" + indexName));
+                    } catch(WarningFailureException e) {
+                        //This will also delete system indices, and will get warning exception.
+                        if (!e.getMessage().contains("this request accesses system indices")) {
+                            throw e;
+                        }
+                    }
+
                 }
             }
         }

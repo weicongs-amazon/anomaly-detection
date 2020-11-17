@@ -25,15 +25,14 @@ import org.apache.http.entity.ContentType;
 import org.apache.http.nio.entity.NStringEntity;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
+import org.elasticsearch.client.WarningFailureException;
 import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 
-import com.amazon.opendistroforelasticsearch.AnomalyDetectorRestTestCase;
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
-import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorRestTestCase;
 import com.amazon.opendistroforelasticsearch.ad.TestHelpers;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
@@ -330,7 +329,14 @@ public class AnomalyDetectorRestApiIT extends AnomalyDetectorRestTestCase {
             detector.getUser()
         );
 
-        deleteIndex(AnomalyDetector.ANOMALY_DETECTORS_INDEX);
+        try {
+            deleteIndex(AnomalyDetector.ANOMALY_DETECTORS_INDEX);
+        } catch(WarningFailureException e) {
+            //This will delete system indices, and will get warning exception.
+            if (!e.getMessage().contains("this request accesses system indices")) {
+                throw e;
+            }
+        }
 
         TestHelpers
             .assertFailWith(
@@ -535,7 +541,8 @@ public class AnomalyDetectorRestApiIT extends AnomalyDetectorRestTestCase {
                 "/.opendistro-anomaly-results/_doc/" + UUIDs.base64UUID(),
                 ImmutableMap.of(),
                 toHttpEntity(anomalyResult),
-                null
+                null,
+                false
             );
         assertEquals("Post anomaly result failed", RestStatus.CREATED, restStatus(response));
 
