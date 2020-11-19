@@ -93,6 +93,11 @@ public abstract class ODFERestTestCase extends ESRestTestCase {
             .build();
     }
 
+    protected static void deleteIndexWithAdminClient(String name) throws IOException {
+        Request request = new Request("DELETE", "/" + name);
+        adminClient().performRequest(request);
+    }
+
     @Override
     protected RestClient buildClient(Settings settings, HttpHost[] hosts) throws IOException {
         RestClientBuilder builder = RestClient.builder(hosts);
